@@ -1,0 +1,19 @@
+html, body, #root {
+	margin: 0;
+	height: 100%;
+}
+
+canvas {
+	display: block;
+	width: 100%;
+	height: 100%;
+}
+
+p {
+	position: fixed;
+	left: 16px;
+	top: 16px;
+	margin: 0;
+	color: #ddd;
+	font: 14px/1.4 system-ui, sans-serif;
+}

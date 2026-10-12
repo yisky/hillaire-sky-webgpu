@@ -1,0 +1,18 @@
+{
+	"compilerOptions": {
+		"target": "ES2022",
+		"module": "ESNext",
+		"moduleResolution": "bundler",
+		"strict": true,
+		"noEmit": true,
+		"skipLibCheck": true,
+		"lib": ["ES2022", "DOM"],
+		// three@0.186 的 exports 指向 .js，没有 types 条件。
+		// 类型检查改走 @types/three 的声明。Vite 默认不读 paths，运行时仍用真实模块。
+		"paths": {
+			"three/webgpu": ["./node_modules/@types/three/build/three.webgpu.d.ts"],
+			"three/tsl": ["./node_modules/@types/three/build/three.tsl.d.ts"]
+		}
+	},
+	"include": ["src/sky", "src/glare", "src/exposure"]
+}
