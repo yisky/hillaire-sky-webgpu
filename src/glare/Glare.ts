@@ -1,11 +1,12 @@
 /**
- * 太阳的镜头炫光。单独的后期组件，不读天空模块。
+ * 太阳的镜头炫光。可见度读场景深度，有云时再读主视图云。
  *
  * 没有贴图。七叶片光圈的鬼影沿太阳和画面中心的连线排开，画面中心有一圈色散光环，
  * 太阳周围是衍射星芒、细纹和一层把暗部抬起来的眩光。
  * 可见度在 GPU 上量一次：太阳圆盘上 24 个点，深度仍是清除值的算露出来，
- * 再乘太阳高度和是否在画内。结果按 `1 - exp(-14 dt)` 跟上。
- * 深度清除值是 `1`。不写深度的像素算露出来，挡住太阳的物体深度小于 `1`。
+ * 再乘云的透射、太阳高度和是否在画内。结果按 `1 - exp(-14 dt)` 跟上。
+ * 深度清除值是 `1`。Tidewater 用反向深度，天空是 `0`，这里反过来比。
+ * 太阳落到 `-0.07` 以下后，光源颜色换成月光。
  */
 
 import {
@@ -46,6 +47,7 @@ import {
 	vec4,
 	uniform,
 } from 'three/tsl';
+import { sampleSkyPro, type SkyProField } from '../sky/clouds/skypro';
 
 const BLADES = 7;
 const ROT = 0.3;
@@ -85,6 +87,15 @@ export interface GlareOptions {
 	/** 太阳亮度。落到地平线下后趋近 `0`，炫光跟着灭。 */
 	sunIntensity: Node;
 
+	/** 月光颜色。太阳高度低于 `-0.07` 时换成它。 */
+	moonColor: Node;
+
+	/** 月光亮度。 */
+	moonIntensity: Node;
+
+	/** 外面持有的体积云。没有时不乘透射。 */
+	clouds: SkyProField | null;
+
 }
 
 /**
@@ -102,6 +113,8 @@ export class Glare {
 	readonly strength = uniform( 1 );
 
 	private readonly depth: Texture;
+
+	private readonly clouds: GlareOptions[ 'clouds' ];
 
 	private readonly sunDirection: Vector3;
 
@@ -125,6 +138,7 @@ export class Glare {
 	constructor( options: GlareOptions ) {
 
 		this.depth = options.depth;
+		this.clouds = options.clouds;
 		this.sunDirection = options.sunDirection;
 
 		const attribute = new StorageBufferAttribute( 1, 1 );
@@ -133,7 +147,14 @@ export class Glare {
 		const sunDirection = uniform( options.sunDirection );
 
 		this.visibility = this.createVisibility( written.element( 0 ) as Node< 'float' >, sunDirection as Node< 'vec3' > );
-		this.flare = this.createFlare( read.element( 0 ) as Node< 'float' >, options.sunColor as Node< 'vec3' >, options.sunIntensity as Node< 'float' > );
+		this.flare = this.createFlare(
+			read.element( 0 ) as Node< 'float' >,
+			options.sunColor as Node< 'vec3' >,
+			options.sunIntensity as Node< 'float' >,
+			options.moonColor as Node< 'vec3' >,
+			options.moonIntensity as Node< 'float' >,
+			sunDirection as Node< 'vec3' >,
+		);
 
 	}
 
@@ -207,7 +228,8 @@ export class Glare {
 			}
 
 			const up = smoothstep( - 0.02, 0.04, sunDirection.y );
-			const target = sky.div( TAPS ).mul( up ).mul( inView );
+			const cloudT = this.cloudTransmittance( sunDirection );
+			const target = sky.div( TAPS ).mul( cloudT ).mul( up ).mul( inView );
 
 			current.assign( mix( current, target, float( 1 ).sub( exp( dt.mul( - 14 ) ) ) ) );
 
@@ -221,8 +243,18 @@ export class Glare {
 	 * @param read 只读的可见度
 	 * @param sunColor 太阳颜色
 	 * @param sunIntensity 太阳亮度
+	 * @param moonColor 月光颜色
+	 * @param moonIntensity 月光亮度
+	 * @param sunDirection 真太阳方向
 	 */
-	private createFlare( vis: Node< 'float' >, sunColor: Node< 'vec3' >, sunIntensity: Node< 'float' > ): Node< 'vec3' > {
+	private createFlare(
+		vis: Node< 'float' >,
+		sunColor: Node< 'vec3' >,
+		sunIntensity: Node< 'float' >,
+		moonColor: Node< 'vec3' >,
+		moonIntensity: Node< 'float' >,
+		sunDirection: Node< 'vec3' >,
+	): Node< 'vec3' > {
 
 		const sunUV = this.sunUV;
 		const aspect = this.aspect;
@@ -235,7 +267,8 @@ export class Glare {
 			const flipY = vec2( 1, - 1 );
 			const p = screenUV.sub( 0.5 ).mul( axes ).mul( flipY );
 			const s = sunUV.sub( 0.5 ).mul( axes ).mul( flipY );
-			const light = sunColor.mul( sunIntensity ).mul( vis ).mul( strength ).mul( 0.02 );
+			const key = sunDirection.y.greaterThan( - 0.07 ).select( sunColor.mul( sunIntensity ), moonColor.mul( moonIntensity ) );
+			const light = key.mul( vis ).mul( strength ).mul( 0.02 );
 
 			let ghosts: Node< 'vec3' > = vec3( 0, 0, 0 );
 
@@ -289,6 +322,21 @@ export class Glare {
 			return vis.greaterThan( 0 ).select( lit, vec3( 0, 0, 0 ) );
 
 		} )() as Node< 'vec3' >;
+
+	}
+
+	/**
+	 * 太阳方向上云的透射。厚云里剩下的那一点透射按 Tidewater 的门槛收成 0。
+	 *
+	 * @param sunDirection 真太阳方向
+	 */
+	private cloudTransmittance( sunDirection: Node< 'vec3' > ): Node< 'float' > {
+
+		if ( ! this.clouds ) return float( 1 );
+
+		const transmitted = sampleSkyPro( this.clouds.viewClouds, this.clouds.viewCamera, sunDirection ).a;
+
+		return transmitted.mul( smoothstep( 0.004, 0.04, transmitted ) );
 
 	}
 

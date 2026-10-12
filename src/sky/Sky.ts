@@ -41,15 +41,6 @@ import { SkyProField } from './clouds/skypro';
 export interface SkyOptions {
 
 	/**
-	 * 是否启用体积云。
-	 *
-	 * 关闭时不生成该实例的云密度场，也不沿视线行进。
-	 *
-	 * @default false
-	 */
-	clouds?: boolean;
-
-	/**
 	 * 云量，范围 `0..1`。
 	 *
 	 * @default 0.49
@@ -322,10 +313,12 @@ export class Sky extends Mesh {
 
 	private disposed = false;
 
-	private cloudsEnabled: boolean;
-
-	/** 打开云之后才有。关掉云就释放。 */
-	private cloudField: SkyProField | null = null;
+	/**
+	 * 体积云。外面创建后赋到这里，天空只把它画进背景。
+	 *
+	 * 没赋就是晴空。天空不创建也不释放这一份。
+	 */
+	clouds: SkyProField | null = null;
 
 	/** 当前交给材质和 `node` 的颜色。晴空和全景云各一份。 */
 	private colorNode: Node< 'vec3' >;
@@ -345,7 +338,7 @@ export class Sky extends Mesh {
 	readonly sunDirectionNode: Node;
 
 	/**
-	 * @param options 云开关、云量、初始太阳方向
+	 * @param options 云量、初始太阳方向
 	 */
 	constructor( options: SkyOptions = {} ) {
 
@@ -371,7 +364,6 @@ export class Sky extends Mesh {
 		this.coverage = options.coverage ?? DEFAULT_COVERAGE;
 		this.windSpeed = 89;
 		this.evolutionSpeed = 60.8;
-		this.cloudsEnabled = options.clouds ?? false;
 		this.rayleighScale = 1;
 		this.mieScale = 1;
 		this.mieG = 0.8;
@@ -418,24 +410,6 @@ export class Sky extends Mesh {
 	}
 
 	/**
-	 * 是否生成这个实例的云。
-	 *
-	 * 关闭时不分配云纹理，也不派发云的 compute。
-	 * 打开后，下一次 {@link Sky.update} 才创建这一份的天气图和历史。
-	 */
-	get clouds(): boolean {
-
-		return this.cloudsEnabled;
-
-	}
-
-	set clouds( enabled: boolean ) {
-
-		this.cloudsEnabled = enabled;
-
-	}
-
-	/**
 	 * 推进一帧天空。在 `renderer.render` 之前调用。
 	 *
 	 * 天空盒中心对齐相机。单位盒子覆盖 `[-0.5, 0.5]`，缩放取远平面的 `0.8`，
@@ -464,35 +438,26 @@ export class Sky extends Mesh {
 	}
 
 	/**
-	 * 云关闭时释放这个实例的纹理。打开时创建天气图和历史。
+	 * 外面赋了 {@link Sky.clouds} 就推进那一份，没赋就画晴空。
 	 *
 	 * @param renderer 本实例派发 compute 使用的渲染器
 	 * @param camera 当前相机
 	 */
 	private syncClouds( renderer: WebGPURenderer, camera: Camera ): void {
 
-		if ( ! this.cloudsEnabled ) {
+		const field = this.clouds;
 
-			if ( this.cloudField ) {
+		if ( ! field ) {
 
-				this.cloudField.dispose( renderer );
-				this.cloudField = null;
-				this.useCloudColor( false );
-
-			}
+			if ( this.cloudyNode ) this.useCloudColor( false );
 
 			return;
 
 		}
 
-		if ( ! this.cloudField ) {
+		if ( ! this.cloudyNode ) this.useCloudColor( true );
 
-			this.cloudField = new SkyProField( this.skyView, this.transmittance );
-			this.useCloudColor( true );
-
-		}
-
-		this.cloudField.update(
+		field.update(
 			renderer,
 			this.coverage,
 			camera,
@@ -516,7 +481,7 @@ export class Sky extends Mesh {
 	 */
 	private useCloudColor( enabled: boolean ): void {
 
-		if ( enabled && this.cloudField ) {
+		if ( enabled && this.clouds ) {
 
 			this.cloudyNode = createSkyColorWithClouds(
 				this.skyView,
@@ -526,8 +491,8 @@ export class Sky extends Mesh {
 				this.moonDirectionNode,
 				this.starIntensityNode,
 				this.timeNode,
-				this.cloudField.viewClouds,
-				this.cloudField.viewCamera,
+				this.clouds.viewClouds,
+				this.clouds.viewCamera,
 			);
 			this.colorNode = this.cloudyNode;
 
@@ -705,8 +670,6 @@ export class Sky extends Mesh {
 		this.multiScattering.dispose();
 		this.skyView.dispose();
 		releaseIrradianceBuffer( this.renderer, this.irradiance.attribute );
-		this.cloudField?.dispose( this.renderer );
-		this.cloudField = null;
 
 	}
 

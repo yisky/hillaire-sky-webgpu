@@ -5,7 +5,7 @@
  * 偏暗时加得快（每秒 `1.6`），偏亮时减得慢（每秒 `1.1`）。倍数限制在 `0.6` 到 `6`。
  * 太阳低于地平线时上限收到 `2`，夜空不会被拉成白天。阈值和天空里恒星出现的区间一致：
  * `-sun.y` 从 `0.02` 到 `0.18`。
- * 倍数晚一帧生效。源码量的是泛光缩到 `1/16` 的那张图；这里还没有泛光，改成在场景颜色上取 `32×32` 个点。
+ * 倍数晚一帧生效。计量读泛光缩到 `1/16` 的那张图，一个 256 线程的组把每个纹素都加一遍。
  */
 
 import {
@@ -17,14 +17,15 @@ import {
 } from 'three/webgpu';
 import {
 	Fn,
+	If,
 	Loop,
 	exp,
 	exp2,
 	float,
-	floor,
 	int,
 	ivec2,
 	length,
+	localId,
 	log2,
 	luminance,
 	max,
@@ -35,13 +36,16 @@ import {
 	texture,
 	textureLoad,
 	textureSize,
+	uint,
 	vec2,
 	vec4,
 	uniform,
+	workgroupArray,
+	workgroupBarrier,
 } from 'three/tsl';
 
-const GRID = 32;
-const SAMPLES = GRID * GRID;
+const GROUP = 256;
+const SPAN = 160;
 
 const REF = 0.25;
 const MIN = 0.6;
@@ -126,43 +130,75 @@ export class AutoExposure {
 
 		const image = texture( color );
 		const dt = this.dt;
+		const sumL = workgroupArray( 'float', GROUP ) as unknown as { element( index: Node ): Node< 'float' > };
+		const sumW = workgroupArray( 'float', GROUP ) as unknown as { element( index: Node ): Node< 'float' > };
 
-		return Fn( () => {
+		const built = Fn( () => {
 
-			const size = textureSize( image, int( 0 ) ) as unknown as Node< 'vec2' >;
+			const thread = localId.x;
+			const size = textureSize( image, int( 0 ) ) as unknown as Node< 'uvec2' >;
+			const count = size.x.mul( size.y );
 			const accL = float( 0 ).toVar();
 			const accW = float( 0 ).toVar();
 
-			Loop( SAMPLES, ( input ) => {
+			Loop( { start: uint( 0 ), end: uint( SPAN ), type: 'uint' }, ( { i } ) => {
 
-				const index = float( ( input as unknown as { i: Node< 'int' > } ).i );
-				const column = index.mod( GRID );
-				const row = floor( index.div( GRID ) );
-				const uv = vec2( column.add( 0.5 ), row.add( 0.5 ) ).div( GRID );
-				const coord = ivec2( uv.mul( size ) );
-				const sample = textureLoad( image, coord, int( 0 ) ) as unknown as Node< 'vec4' >;
-				const centered = uv.sub( 0.5 );
-				const weight = max( float( 1 ).sub( length( centered.mul( vec2( 1, 1.4 ) ) ).mul( 1.2 ) ), 0.15 );
-				const logLum = log2( max( luminance( sample.rgb ), 1e-4 ) );
+				const index = thread.add( i.mul( uint( GROUP ) ) );
 
-				accL.addAssign( logLum.mul( weight ) );
-				accW.addAssign( weight );
+				If( index.lessThan( count ), () => {
+
+					const x = index.mod( size.x );
+					const y = index.div( size.x );
+					const sample = textureLoad( image, ivec2( int( x ), int( y ) ), int( 0 ) ) as unknown as Node< 'vec4' >;
+					const centered = vec2( float( x ).add( 0.5 ).div( float( size.x ) ), float( y ).add( 0.5 ).div( float( size.y ) ) ).sub( 0.5 );
+					const weight = max( float( 1 ).sub( length( centered.mul( vec2( 1, 1.4 ) ) ).mul( 1.2 ) ), 0.15 );
+					const logLum = log2( max( luminance( sample.rgb ), 1e-4 ) );
+
+					accL.addAssign( logLum.mul( weight ) );
+					accW.addAssign( weight );
+
+				} );
 
 			} );
 
-			const average = exp2( accL.div( max( accW, 1e-4 ) ) );
-			const ratio = float( REF ).div( average );
-			const partial = ratio.greaterThan( 1 ).select( pow( ratio, 0.8 ), ratio );
-			const night = smoothstep( 0.02, 0.18, sunDirection.y.negate() );
-			const cap = mix( MAX, NIGHT_MAX, night );
-			const target = partial.clamp( MIN, cap );
-			const rate = target.greaterThan( current ).select( UP, DOWN );
-			const step = float( 1 ).sub( exp( dt.mul( rate ).negate() ) );
-			const next = exp2( mix( log2( max( current, 1e-3 ) ), log2( target ), step ) );
+			sumL.element( thread ).assign( accL );
+			sumW.element( thread ).assign( accW );
+			workgroupBarrier();
 
-			current.assign( next );
+			for ( let span = GROUP / 2; span > 0; span >>= 1 ) {
 
-		} )().compute( 1 ) as ComputeNode;
+				const step = uint( span );
+
+				If( thread.lessThan( step ), () => {
+
+					sumL.element( thread ).addAssign( sumL.element( thread.add( step ) ) );
+					sumW.element( thread ).addAssign( sumW.element( thread.add( step ) ) );
+
+				} );
+
+				workgroupBarrier();
+
+			}
+
+			If( thread.equal( uint( 0 ) ), () => {
+
+				const average = exp2( sumL.element( uint( 0 ) ).div( max( sumW.element( uint( 0 ) ), 1e-4 ) ) );
+				const ratio = float( REF ).div( average );
+				const partial = ratio.greaterThan( 1 ).select( pow( ratio, 0.8 ), ratio );
+				const night = smoothstep( 0.02, 0.18, sunDirection.y.negate() );
+				const cap = mix( MAX, NIGHT_MAX, night );
+				const target = partial.clamp( MIN, cap );
+				const rate = target.greaterThan( current ).select( UP, DOWN );
+				const step = float( 1 ).sub( exp( dt.mul( rate ).negate() ) );
+				const next = exp2( mix( log2( max( current, 1e-3 ) ), log2( target ), step ) );
+
+				current.assign( next );
+
+			} );
+
+		} )();
+
+		return ( built as unknown as { compute( count: number[], size: number[] ): ComputeNode } ).compute( [ 1, 1, 1 ], [ GROUP, 1, 1 ] );
 
 	}
 

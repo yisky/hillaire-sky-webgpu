@@ -14,5 +14,5 @@
 			"three/tsl": ["./node_modules/@types/three/build/three.tsl.d.ts"]
 		}
 	},
-	"include": ["src/sky", "src/glare", "src/exposure"]
+	"include": ["src/sky", "src/glare", "src/exposure", "src/bloom", "src/grade", "src/trees.ts"]
 }

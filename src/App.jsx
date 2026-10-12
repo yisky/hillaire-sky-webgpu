@@ -2,18 +2,49 @@ import { useEffect, useRef } from 'react'
 import * as THREE from 'three/webgpu'
 import { cameraPosition, mix, normalize, pass, positionWorld, smoothstep, vec3 } from 'three/tsl'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
+import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js'
+import { SunLight } from 'three/addons/lights/SunLight.js'
+import { SunLightNode } from 'three/addons/lights/SunLightNode.js'
 import { Sky } from './sky'
+import { SkyProField } from './sky/clouds/skypro'
 import { Glare } from './glare'
 import { AutoExposure } from './exposure'
+import { createForest } from './trees'
+import { SceneBloom } from './bloom/Bloom'
+import { grade, updateGrade } from './grade/grade'
 
-// 站在小岛边缘朝外看。
-const STAND_Z = - 3200
+// 开场机位，和页面里的轨道相机一致。
+const HOME = { position: [ - 5, 1.2, 5 ], target: [ 0, 1, 0 ], fov: 45 }
+
+// 整组模型先缩到 0.08，再挪到这个位置。道路在组内再抬高一点。
+const SITE_FILES = [
+	[ '/models/building-transformed.glb', 0 ],
+	[ '/models/building_floor-transformed.glb', 0 ],
+	[ '/models/building_trees-transformed.glb', 0 ],
+	[ '/models/landscape-transformed.glb', 0 ],
+	[ '/models/terrain.glb', 0 ],
+	[ '/models/roads-transformed.glb', 0.019 ],
+]
 
 function placeMoon( sky ) {
 
 	const sun = sky.sunDirection
 
 	sky.moonDirection.set( - sun.x, Math.abs( sun.y ) * 0.8 + 0.25, - sun.z ).normalize()
+
+}
+
+function disposeObject( root ) {
+
+	root.traverse( ( obj ) => {
+
+		obj.geometry?.dispose()
+		const materials = obj.material
+		if ( ! materials ) return
+		for ( const material of Array.isArray( materials ) ? materials : [ materials ] ) material.dispose()
+
+	} )
 
 }
 
@@ -25,39 +56,116 @@ export default function App() {
 	useEffect( () => {
 
 		const canvas = canvasRef.current
-		const camera = new THREE.PerspectiveCamera( 50, 1, 0.1, 100 )
-		camera.position.set( 0, 1.5, STAND_Z + 6 )
+		const camera = new THREE.PerspectiveCamera( HOME.fov, 1, 0.1, 1000 )
+		camera.position.set( ...HOME.position )
 		const timer = new THREE.Timer()
 		timer.connect( document )
 		const scene = new THREE.Scene()
 		const sky = new Sky( { sunDirection: new THREE.Vector3( 0.2, 0.45, - 1 ).normalize() } )
-		sky.clouds = true
+		const clouds = new SkyProField( sky.skyView, sky.transmittance )
+		sky.clouds = clouds
 		sky.coverage = 0.49
 		placeMoon( sky )
 		scene.add( sky )
 
-		const sunLight = new THREE.DirectionalLight( 0xffffff, 1 )
-		const moonLight = new THREE.DirectionalLight( 0xffffff, 0 )
+		const sunLight = new SunLight( 0xffffff, 1 )
+		const moonLight = new SunLight( 0xffffff, 0 )
 		const ambient = new THREE.AmbientLight( 0xffffff, 1 )
-		scene.add( sunLight, sunLight.target, moonLight, moonLight.target, ambient )
+		// 和 Planpoint 同一套：2048 贴图，近 30、远 80，bias -0.001，normalBias 0.05。
+		// 同一时刻只让当前主光投射，避免太阳和月亮各渲一遍。
+		sunLight.castShadow = true
+		for ( const light of [ sunLight, moonLight ] ) {
 
-		const sphereMaterial = new THREE.MeshLambertNodeMaterial()
-		const sphere = new THREE.Mesh( new THREE.SphereGeometry( 0.7, 48, 32 ), sphereMaterial )
-		sphere.position.set( 0, 0.7, STAND_Z )
-		scene.add( sphere )
+			light.shadow.mapSize.set( 2048, 2048 )
+			light.shadow.camera.near = 30
+			light.shadow.camera.far = 80
+			light.shadow.camera.left = -25
+			light.shadow.camera.right = 25
+			light.shadow.camera.top = 25
+			light.shadow.camera.bottom = -25
+			light.shadow.bias = -0.0005
+			light.shadow.normalBias = 0.05
+
+		}
+		scene.add( sunLight, moonLight, ambient )
+
+		const site = new THREE.Group()
+		site.scale.setScalar( 0.08 )
+		site.position.set( 5.8, 0, 1 )
+		scene.add( site )
+
+		const draco = new DRACOLoader()
+		draco.setDecoderPath( '/draco/' )
+		const loader = new GLTFLoader()
+		loader.setDRACOLoader( draco )
 
 		const controls = new OrbitControls( camera, canvas )
-		controls.target.set( 0, 3.2, STAND_Z )
-		controls.enableDamping = true
-		controls.minDistance = 2
-		controls.maxDistance = 30
+		controls.target.set( ...HOME.target )
+		// controls.enablePan = false
+		// controls.screenSpacePanning = false
+		// controls.minPolarAngle = 1.1
+		// controls.maxPolarAngle = Math.PI / 2 - 0.05
+		controls.enableDamping = false
+		controls.zoomSpeed = 0.5
+		controls.minDistance = 4
+		controls.maxDistance = 25
 		controls.update()
 
 		let renderer = null
 		let pipeline = null
 		let scenePass = null
+		let forest = null
+		let bloom = null
 		let stopped = false
 		let onResize = null
+
+		createForest().then( ( next ) => {
+
+			if ( stopped ) {
+
+				next.dispose()
+				return
+
+			}
+
+			forest = next
+			scene.add( forest.object )
+
+		} )
+
+		for ( const [ url, height ] of SITE_FILES ) {
+
+			loader.load( url, ( gltf ) => {
+
+				if ( stopped ) {
+
+					disposeObject( gltf.scene )
+					return
+
+				}
+
+				gltf.scene.position.y = height
+				gltf.scene.traverse( ( obj ) => {
+
+					if ( obj.isMesh ) {
+
+						obj.castShadow = true
+						obj.receiveShadow = true
+
+					}
+
+					const material = obj.material
+					if ( ! material || material.name !== 'TerrainCenterNew' ) return
+					material.metalness = 0.3
+					material.roughness = 0.95
+					material.normalScale?.set( - 0.25, - 0.5 )
+
+				} )
+				site.add( gltf.scene )
+
+			} )
+
+		}
 
 		async function start() {
 
@@ -74,6 +182,8 @@ export default function App() {
 				antialias: true,
 				requiredLimits: { maxStorageTexturesPerShaderStage: 8 },
 			} )
+			renderer.library.addLight( SunLightNode, SunLight )
+			renderer.shadowMap.enabled = true
 			await renderer.init()
 			if ( stopped ) {
 
@@ -83,8 +193,8 @@ export default function App() {
 			}
 
 			renderer.setPixelRatio( window.devicePixelRatio )
-			// 自动曝光之后压高光。three 自带的 ACES Filmic，和 Tidewater 同一条曲线。
-			renderer.toneMapping = THREE.ACESFilmicToneMapping
+			// ACES、固定曝光 0.55、sRGB 和抖动都在 grade 里做，这里不再套一层。
+			renderer.toneMapping = THREE.NoToneMapping
 			const resize = () => {
 
 				const w = canvas.clientWidth
@@ -105,13 +215,18 @@ export default function App() {
 				sunDirection: sky.sunDirection,
 				sunColor: sky.sunColorNode,
 				sunIntensity: sky.sunIntensityNode,
+				moonColor: sky.moonColorNode,
+				moonIntensity: sky.moonIntensityNode,
+				clouds,
 			} )
+			bloom = new SceneBloom( scenePass.getTextureNode( 'output' ) )
 			const exposure = new AutoExposure( {
-				color: scenePass.getTexture( 'output' ),
+				color: bloom.meter,
 				sunDirection: sky.sunDirection,
 			} )
 			pipeline = new THREE.RenderPipeline( renderer )
-			pipeline.outputNode = exposure.apply( glare.composite( scenePass ) )
+			pipeline.outputColorTransform = false
+			pipeline.outputNode = grade( exposure.apply( glare.composite( scenePass.add( bloom ) ) ) )
 
 			// 地平线以下换成海色，用来看平视时的曝光。天空本身在这块是黑的。
 			const sea = vec3( 0.08, 0.28, 0.38 )
@@ -120,9 +235,10 @@ export default function App() {
 			renderer.setAnimationLoop( ( time ) => {
 
 				timer.update( time )
-				controls.update()
-				placeMoon( sky )
 				const delta = timer.getDelta()
+				controls.update()
+				forest?.update( camera )
+				placeMoon( sky )
 				sky.update( renderer, delta, camera )
 				if ( ! tinted ) {
 
@@ -138,9 +254,13 @@ export default function App() {
 				moonLight.position.copy( sky.moonDirection )
 				moonLight.color.copy( sky.moonColor )
 				moonLight.intensity = sky.moonIntensity
+				const sunLit = sky.sunIntensity >= sky.moonIntensity
+				sunLight.castShadow = sunLit
+				moonLight.castShadow = ! sunLit
 				ambient.color.copy( sky.skyIrradiance )
 				glare.update( renderer, camera, delta )
 				exposure.update( delta )
+				updateGrade()
 				pipeline.render()
 				renderer.compute( glare.visibility )
 				renderer.compute( exposure.adapt )
@@ -157,8 +277,11 @@ export default function App() {
 			controls.dispose()
 			timer.dispose()
 			sky.dispose()
-			sphere.geometry.dispose()
-			sphereMaterial.dispose()
+			clouds.dispose( renderer )
+			disposeObject( site )
+			forest?.dispose()
+			bloom?.dispose()
+			draco.dispose()
 			if ( ! renderer ) return
 			window.removeEventListener( 'resize', onResize )
 			renderer.setAnimationLoop( null )
