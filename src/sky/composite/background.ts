@@ -259,7 +259,7 @@ export function createSkyColorNode(
 
 }
 
-/** 环境贴图里的星光比例。Tidewater 反射天空用 `0.08`，避免亮星在粗糙反射里闪。 */
+/** 环境贴图里的星光比例。`0.08` 避免亮星在粗糙反射里闪。 */
 const STAR_REFLECTION = 0.08;
 
 /**

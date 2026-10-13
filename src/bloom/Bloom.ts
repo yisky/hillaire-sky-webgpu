@@ -134,7 +134,7 @@ export class SceneBloom extends TempNode {
 	/** 缩到 1/16 的一级，给自动曝光计量。 */
 	readonly meter: Texture;
 
-	/** 加回画面的倍数。Tidewater `post.params.bloom`，默认 `0.05`。 */
+	/** 加回画面的倍数。默认 `0.05`。 */
 	readonly bloom = uniform( 0.05 );
 
 	private readonly down: RenderTarget[];

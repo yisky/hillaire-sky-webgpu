@@ -3,7 +3,7 @@ import { Color, Vector3 } from 'three/webgpu';
 /**
  * 大气与天空使用的物理常数和场景单位。
  *
- * 数值对齐 Tidewater `src/sky/Atmosphere.js` 与 Hillaire EGSR 2020 第 4 节。
+ * 数值对齐 Hillaire EGSR 2020 第 4 节。
  * 距离在大气计算里用千米；云和相机高度用米。米氏消光取 Bruneton / Unreal
  * 参考实现的 `4.440e-3 km^-1`（散射 `3.996e-3`，吸收约 `0.444e-3`），
  * 不按论文表 1 把 `4.40e-6 m^-1` 整列当成吸收。
@@ -18,14 +18,14 @@ export const ATMOSPHERE_RADIUS_KM = 6460;
 /**
  * 大气顶之外的太阳照度，三个通道相同。
  *
- * 这是场景单位，不是物理勒克斯。Tidewater 用 `11`，避免 fp16 缓冲溢出。
+ * 这是场景单位，不是物理勒克斯。取 `11` 以免 fp16 缓冲溢出。
  */
 export const SUN_ILLUMINANCE = 11;
 
 /**
  * 太阳盘角半径，单位弧度。
  *
- * 物理视半径约 `0.004675` rad（0.27°）。系数 `1.15` 来自 Tidewater，
+ * 物理视半径约 `0.004675` rad（0.27°）。系数 `1.15`
  * 让低分辨率天空里的日盘稍大一点。
  */
 export const SUN_ANGULAR_RADIUS = 0.004675 * 1.15;
@@ -33,7 +33,7 @@ export const SUN_ANGULAR_RADIUS = 0.004675 * 1.15;
 /**
  * 太阳盘辐射强度，已经除过立体角后的场景单位上限。
  *
- * 物理值约为照度除以立体角（约 `1.6e5`）。Tidewater 钳到 `2500` 以适配 fp16。
+ * 物理值约为照度除以立体角（约 `1.6e5`）。钳到 `2500` 以适配 fp16。
  */
 export const SUN_DISK_INTENSITY = 2500;
 
@@ -55,7 +55,7 @@ export const SKY_VIEW_HEIGHT = 108;
 /**
  * 默认地面反照率。
  *
- * 论文示例用均匀 `0.3`。这里沿用 Tidewater 的偏暗海面值，
+ * 论文示例用均匀 `0.3`。这里用偏暗海面值，
  * 多次散射因此比论文图更暗。
  */
 export const DEFAULT_GROUND_ALBEDO = new Color( 0.06, 0.08, 0.1 );

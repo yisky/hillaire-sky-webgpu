@@ -22,6 +22,7 @@ const ICO = {
 	sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.3 5.3l1.4 1.4M17.3 17.3l1.4 1.4M5.3 18.7l1.4-1.4M17.3 6.7l1.4-1.4"/>',
 	cloud: '<path d="M7 18a4.5 4.5 0 1 1 .8-8.9A6 6 0 0 1 19 11a3.5 3.5 0 0 1-.5 7z"/>',
 	sparkles: '<path d="M11 3.5 12.6 8.4 17.5 10l-4.9 1.6L11 16.5l-1.6-4.9L4.5 10l4.9-1.6z"/><path d="M18.5 14.5l.7 2 2 .7-2 .7-.7 2-.7-2-2-.7 2-.7z"/>',
+	camera: '<path d="M4 8h3l1.5-2.5h7L17 8h3a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1z"/><circle cx="12" cy="13.5" r="3.5"/>',
 	chevron: '<path d="m6 9 6 6 6-6"/>',
 	close: '<path d="M6 6l12 12M18 6 6 18"/>',
 }
@@ -111,6 +112,42 @@ function slider( label, value, min, max, step, format, log ) {
 		if ( rail.hasPointerCapture( event.pointerId ) ) at( event )
 	} )
 	rail.addEventListener( 'pointerup', () => root.classList.remove( 'is-dragging' ) )
+	return { root, paint, get value() { return current } }
+}
+
+function select( label, value, options ) {
+	const root = el( 'div', 'tw-ctl tw-ctl-select is-segmented' )
+	const head = el( 'div', 'tw-row' )
+	head.append( el( 'span', 'tw-label', `<span class="tw-label-text">${ label }</span>` ) )
+	const seg = el( 'div', 'tw-seg' )
+	seg.setAttribute( 'role', 'radiogroup' )
+	seg.setAttribute( 'aria-label', label )
+	seg.style.setProperty( '--n', String( options.length ) )
+	const ind = el( 'span', 'tw-seg-ind' )
+	seg.append( ind )
+	let current = value
+	const btns = options.map( ( opt, i ) => {
+		const button = el( 'button', 'tw-seg-btn' )
+		button.type = 'button'
+		button.setAttribute( 'role', 'radio' )
+		button.textContent = opt.label
+		button.addEventListener( 'click', () => paint( opt.value ) )
+		seg.append( button )
+		return button
+	} )
+	root.append( head, seg )
+	const paint = ( next ) => {
+		const i = options.findIndex( ( opt ) => opt.value === next )
+		if ( i < 0 ) return current
+		current = next
+		btns.forEach( ( button, j ) => {
+			button.setAttribute( 'aria-checked', String( j === i ) )
+			button.tabIndex = j === i ? 0 : - 1
+		} )
+		ind.style.setProperty( '--i', String( i ) )
+		return current
+	}
+	paint( value )
 	return { root, paint, get value() { return current } }
 }
 
@@ -355,6 +392,15 @@ export function createSettings() {
 	air.body.append( ev.root )
 	sky.append( sunFolder.root, air.root )
 
+	const cam = page( 'camera', '相机', 'camera' )
+	const view = folder( '视图', 'camera', true )
+	const camera = select( '相机', 'orbit', [
+		{ label: '第一人称', value: 'first' },
+		{ label: '轨道', value: 'orbit' },
+	] )
+	view.body.append( camera.root )
+	cam.append( view.root )
+
 	const post = page( 'post', '效果', 'sparkles' )
 	const fx = folder( '效果', 'sparkles', true )
 	const ao = slider( '环境光遮蔽', 1, 0, 1.5, 0.01, ( v ) => v.toFixed( 2 ) )
@@ -393,6 +439,8 @@ export function createSettings() {
 		get contrast() { return contrast.value },
 		get vignette() { return vignette.value },
 		get grain() { return grain.value },
+		get camera() { return camera.value },
+		setCamera( mode ) { camera.paint( mode ) },
 		dispose() { root.remove() },
 	}
 }

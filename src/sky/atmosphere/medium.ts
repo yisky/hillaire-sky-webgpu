@@ -3,8 +3,7 @@
  *
  * 密度和消光对应 Hillaire EGSR 2020 第 4 节，距离单位为千米。
  * 透射纹理坐标是 Bruneton 2008 的 `(ρ, d)`，论文第 5.2 节采用。
- * 公式与 Tidewater `Atmosphere.js` 的 `atmosphereMedium`、
- * `atmosphereTransmittanceUV`、`atmosphereRaySphereNearest` 相同。
+ * 公式对应 `atmosphereMedium`、`atmosphereTransmittanceUV`、`atmosphereRaySphereNearest`。
  */
 
 import { Fn, abs, dot, float, max, select, sqrt, struct, vec2, vec3 } from 'three/tsl';

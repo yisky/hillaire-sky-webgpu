@@ -167,7 +167,7 @@ export class Sky extends Mesh {
 	/**
 	 * 云的平移速度，米/秒。沿风向推动天气图和形状。
 	 *
-	 * SkyPro「Partly cloudy」的延时速度是 `89`。Tidewater 用 `12`。
+	 * SkyPro「Partly cloudy」的延时速度是 `89`。
 	 *
 	 * @default 89
 	 */

@@ -1,9 +1,9 @@
 /**
  * 调色。跟在自动曝光后面、输出前面。
  *
- * 这几项对应 Tidewater 的 `PostParams`，运行时改 `.value`。
+ * 这几项运行时改 `.value`。
  * 暖色 `0.02`、饱和度 `1.06`、对比度 `1.04`、暗角 `0.28`、颗粒 `0.012`。
- * `exposure` 对应 `frame.exposure`，默认 `0.55`。Tidewater 的界面按 EV 写成 `0.55 * 2^ev`。
+ * `exposure` 默认 `0.55`。界面按 EV 写成 `0.55 * 2^ev`。
  * 后面是 ACES、sRGB，最后加 ±1/255 的抖动。
  */
 
@@ -28,7 +28,7 @@ import {
 	viewportCoordinate,
 } from 'three/tsl';
 
-/** Tidewater `PostParams` 里的调色项。 */
+/** 调色项。 */
 export const gradeParams = {
 	warmth: uniform( 0.02 ),
 	saturation: uniform( 1.06 ),
@@ -37,7 +37,7 @@ export const gradeParams = {
 	grain: uniform( 0.012 ),
 };
 
-/** Tidewater 的 `frame.exposure`。 */
+/** 色调映射前的曝光倍数。 */
 export const exposure = uniform( 0.55 );
 
 const frameIndex = uniform( 0, 'uint' );

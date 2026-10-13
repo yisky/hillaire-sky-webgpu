@@ -1,7 +1,7 @@
 /**
  * SkyPro “Partly cloudy” 的手写 WGSL。
  *
- * 密度、行进和天边消融照 Tidewater `src/sky/SkyProClouds.js`。
+ * 密度、行进和天边消融按 SkyPro “Partly cloudy”。
  * 云底 4000 米，厚 5200 米。25 公里到 45 公里的云混进天空色。
  * 形状噪声铺成 512² 的二维图，用 `textureLoad` 做三线性插值。
  * 查找表是存储纹理。

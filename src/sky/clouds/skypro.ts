@@ -1,7 +1,7 @@
 /**
  * 每个天空一份的 SkyPro 积云。
  *
- * 预设是 Tidewater `SkyProClouds.js` 的 “Partly cloudy”。
+ * 预设是 SkyPro 的 “Partly cloudy”。
  * 半分辨率历史，每帧只追踪 4×4 里的一个槽。形状噪声来自 `public/clouds`。
  * 全景和地面云影不在这里。
  */

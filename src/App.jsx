@@ -3,6 +3,7 @@ import * as THREE from 'three/webgpu'
 import { builtinAOContext, float, Fn, mix, pass, screenUV, texture, uniform, vec4 } from 'three/tsl'
 import { ao } from 'three/addons/tsl/display/GTAONode.js'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
+import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js'
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
 import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js'
 import { SunLight } from 'three/addons/lights/SunLight.js'
@@ -19,8 +20,15 @@ import { SkyEnvironment } from './env/Environment'
 import { createFps } from './ui/fps'
 import { createSettings } from './ui/settings'
 
-// 开场机位，和页面里的轨道相机一致。
-const HOME = { position: [ - 5, 1.2, 5 ], target: [ 0, 1, 0 ], fov: 45 }
+const ORBIT_HOME = { position: [ - 5, 1.2, 5 ], target: [ 0, 1, 0 ], fov: 45 }
+const EYE = 1.8 * 0.08
+const WALK = 1.4
+const WALK_FAST = 3
+const EYE_MIN = 0.04
+const ORBIT_NEAR = 0.1
+const FPS_NEAR = 0.02
+const ORBIT_MIN_POLAR = 0.05
+const DOWN = new THREE.Vector3( 0, - 1, 0 )
 
 // 离原点超过这个距离的物体不投射阴影。日月方向或相机超出下面的幅度才重画阴影。
 const SHADOW_CAST_RADIUS = 40
@@ -40,7 +48,7 @@ const SITE_FILES = [
 
 const SUN_UP = new THREE.Vector3( 0, 1, 0 )
 
-// Tidewater 的太阳位置：北纬 24°、赤纬 6°。返回指向太阳的方向，+x 东、−z 北、+y 上。
+// 太阳位置：北纬 24°、赤纬 6°。返回指向太阳的方向，+x 东、−z 北、+y 上。
 function sunDirectionFromTime( hours, out ) {
 
 	const phi = THREE.MathUtils.degToRad( 24 )
@@ -67,6 +75,8 @@ const FOG_DUSK = 18.2
 const FOG_GATHER = 3.5
 const FOG_REFERENCE = new THREE.Color( '#d0dce8' )
 const FOG_LUMA = 0.2126 * FOG_REFERENCE.r + 0.7152 * FOG_REFERENCE.g + 0.0722 * FOG_REFERENCE.b
+const FOG_INSCATTER = 1.5
+const SUN_ILLUMINANCE = 11
 
 // 辐射雾：日出前后最浓，上午散掉。日落到后半夜保持稀，黎明前几小时才积起来，夜里才看得见天空。
 function radiationFogDensity( hours ) {
@@ -133,8 +143,9 @@ export default function App() {
 
 		const canvas = canvasRef.current
 		const settings = createSettings()
-		const camera = new THREE.PerspectiveCamera( HOME.fov, 1, 0.1, 1000 )
-		camera.position.set( ...HOME.position )
+		const camera = new THREE.PerspectiveCamera( ORBIT_HOME.fov, 1, ORBIT_NEAR, 1000 )
+		camera.position.set( ...ORBIT_HOME.position )
+		camera.lookAt( ...ORBIT_HOME.target )
 		const timer = new THREE.Timer()
 		timer.connect( document )
 		const scene = new THREE.Scene()
@@ -184,17 +195,83 @@ export default function App() {
 		const loader = new GLTFLoader()
 		loader.setDRACOLoader( draco )
 
-		const controls = new OrbitControls( camera, canvas )
-		controls.target.set( ...HOME.target )
-		// controls.enablePan = false
-		// controls.screenSpacePanning = false
-		// controls.minPolarAngle = 1.1
-		// controls.maxPolarAngle = Math.PI / 2 - 0.05
-		controls.enableDamping = false
-		controls.zoomSpeed = 0.5
-		controls.minDistance = 4
-		controls.maxDistance = 25
-		controls.update()
+		const orbit = new OrbitControls( camera, canvas )
+		orbit.target.set( ...ORBIT_HOME.target )
+		orbit.enableDamping = false
+		orbit.zoomSpeed = 0.5
+		orbit.minDistance = 4
+		orbit.maxDistance = 25
+		orbit.minPolarAngle = ORBIT_MIN_POLAR
+		orbit.maxPolarAngle = Math.PI / 2
+		orbit.update()
+		const look = new PointerLockControls( camera, canvas )
+		const lookDir = new THREE.Vector3()
+		const ray = new THREE.Raycaster()
+		const rayFrom = new THREE.Vector3()
+		const euler = new THREE.Euler( 0, 0, 0, 'YXZ' )
+		let camMode = 'orbit'
+		const groundY = ( x, z ) => {
+
+			rayFrom.set( x, 20, z )
+			ray.set( rayFrom, DOWN )
+			const hit = ray.intersectObject( site, true ).find( ( item ) => item.object.userData.walk )
+			return hit ? hit.point.y : 0
+
+		}
+		const standY = ( x, z ) => groundY( x, z ) + EYE
+		const applyCam = ( mode ) => {
+
+			if ( mode !== 'first' && mode !== 'orbit' ) return
+			if ( mode === camMode ) return
+			if ( look.isLocked ) look.unlock()
+			camMode = mode
+			orbit.enabled = mode === 'orbit'
+			if ( mode === 'orbit' ) {
+
+				camera.near = ORBIT_NEAR
+				camera.getWorldDirection( lookDir )
+				orbit.target.copy( camera.position ).addScaledVector( lookDir, orbit.minDistance )
+				orbit.update()
+
+			} else {
+
+				camera.near = FPS_NEAR
+				euler.setFromQuaternion( camera.quaternion, 'YXZ' )
+				euler.x = 0
+				euler.z = 0
+				camera.position.y = standY( camera.position.x, camera.position.z )
+				camera.quaternion.setFromEuler( euler )
+
+			}
+
+			camera.updateProjectionMatrix()
+
+		}
+		const keys = new Set()
+		const onCanvasClick = () => {
+
+			if ( camMode === 'first' && ! look.isLocked ) look.lock()
+
+		}
+		const onKeyDown = ( e ) => {
+
+			if ( e.target && ( e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA' ) ) return
+			keys.add( e.code )
+			if ( e.code === 'Space' ) e.preventDefault()
+			if ( e.code === 'KeyV' ) {
+
+				e.preventDefault()
+				settings.setCamera( camMode === 'orbit' ? 'first' : 'orbit' )
+
+			}
+
+		}
+		const onKeyUp = ( e ) => keys.delete( e.code )
+		const onBlur = () => keys.clear()
+		canvas.addEventListener( 'click', onCanvasClick )
+		window.addEventListener( 'keydown', onKeyDown )
+		window.addEventListener( 'keyup', onKeyUp )
+		window.addEventListener( 'blur', onBlur )
 
 		let renderer = null
 		let pipeline = null
@@ -212,6 +289,7 @@ export default function App() {
 		const fogDay = new THREE.Color()
 		const fogNight = new THREE.Color()
 		const fogTint = new THREE.Color()
+		const fogInscatter = new THREE.Color()
 		let stopped = false
 		let onResize = null
 		let loadsLeft = SITE_FILES.length + 1
@@ -264,8 +342,10 @@ export default function App() {
 				}
 
 				gltf.scene.position.y = height
+				const walk = /terrain|landscape|roads/.test( url )
 				gltf.scene.traverse( ( obj ) => {
 
+					if ( walk ) obj.userData.walk = true
 					if ( obj.isMesh ) {
 
 						obj.castShadow = true
@@ -440,7 +520,6 @@ export default function App() {
 				fogHeightFalloff: 0.05,
 				fogStartDistance: 5,
 				noiseStrength: 0.0015,
-				directionalInscatteringColor: '#d0dce8',
 			} )
 			fog.setCamera( camera )
 			const exposure = new AutoExposure( {
@@ -457,7 +536,19 @@ export default function App() {
 
 				timer.update( time )
 				const delta = timer.getDelta()
-				controls.update()
+				applyCam( settings.camera )
+				if ( camMode === 'first' && look.isLocked ) {
+
+					const speed = ( keys.has( 'ShiftLeft' ) || keys.has( 'ShiftRight' ) ? WALK_FAST : WALK ) * delta
+					if ( keys.has( 'KeyW' ) ) look.moveForward( speed )
+					if ( keys.has( 'KeyS' ) ) look.moveForward( - speed )
+					if ( keys.has( 'KeyA' ) ) look.moveRight( - speed )
+					if ( keys.has( 'KeyD' ) ) look.moveRight( speed )
+					if ( keys.has( 'KeyE' ) || keys.has( 'Space' ) ) camera.position.y += speed
+					if ( keys.has( 'KeyQ' ) ) camera.position.y -= speed
+					camera.position.y = Math.max( EYE_MIN, camera.position.y )
+
+				}
 				forest?.update( camera )
 				const sun = settings.sun
 				if ( sun.advance ) sun.setTime( ( sun.time + delta * sun.speed + 24 ) % 24 )
@@ -511,7 +602,9 @@ export default function App() {
 				fogTint.multiplyScalar( THREE.MathUtils.lerp( 1, 0.22, night ) )
 				fog.fogMaxOpacity = THREE.MathUtils.lerp( 0.35, 0.12, night )
 				fog.fogColor = fogTint
-				fog.directionalInscatteringColor = fogTint
+				if ( sunLit ) fogInscatter.copy( sky.sunColor ).multiplyScalar( FOG_INSCATTER * ( sky.sunIntensity / SUN_ILLUMINANCE ) )
+				else fogInscatter.copy( sky.moonColor ).multiplyScalar( FOG_INSCATTER * night )
+				fog.directionalInscatteringColor = fogInscatter
 				fog.inscatteringLightDirection = lightDirection.copy( sunLit ? sky.sunDirection : sky.moonDirection ).negate()
 				glare.update( renderer, camera, delta )
 				exposure.update( delta )
@@ -531,7 +624,12 @@ export default function App() {
 
 			stopped = true
 			settings.dispose()
-			controls.dispose()
+			canvas.removeEventListener( 'click', onCanvasClick )
+			window.removeEventListener( 'keydown', onKeyDown )
+			window.removeEventListener( 'keyup', onKeyUp )
+			window.removeEventListener( 'blur', onBlur )
+			orbit.dispose()
+			look.dispose()
 			timer.dispose()
 			sky.dispose()
 			clouds.dispose( renderer )

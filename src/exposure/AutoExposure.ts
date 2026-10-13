@@ -69,22 +69,22 @@ export class AutoExposure {
 	/** 适应。场景画完后派发，下一帧才用新的倍数。 */
 	readonly adapt: ComputeNode;
 
-	/** 大于 `0.5` 才适应，否则倍数保持 `1`。Tidewater `autoExposure.enabled`。 */
+	/** 大于 `0.5` 才适应，否则倍数保持 `1`。 */
 	readonly enabled = uniform( 1 );
 
-	/** 不需要修正的平均亮度。Tidewater 着色器里叫 `refLum`，因为 `ref` 是 WGSL 关键字。 */
+	/** 不需要修正的平均亮度。着色器里叫 `refLum`，因为 `ref` 是 WGSL 关键字。 */
 	readonly ref = uniform( 0.25 );
 
-	/** 倍数下限。Tidewater `autoExposure.min`。 */
+	/** 倍数下限。 */
 	readonly min = uniform( 0.6 );
 
-	/** 倍数上限。Tidewater `autoExposure.max`。夜里另收到 `2`。 */
+	/** 倍数上限。夜里另收到 `2`。 */
 	readonly max = uniform( 6 );
 
-	/** 变亮的速度，单位 1/秒。Tidewater `autoExposure.up`。 */
+	/** 变亮的速度，单位 1/秒。 */
 	readonly up = uniform( 1.6 );
 
-	/** 变暗的速度，单位 1/秒。Tidewater `autoExposure.down`。 */
+	/** 变暗的速度，单位 1/秒。 */
 	readonly down = uniform( 1.1 );
 
 	private readonly dt = uniform( 1 / 60 );
