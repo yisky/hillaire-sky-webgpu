@@ -195,6 +195,27 @@ function moonlitSky( direction: Node< 'vec3' >, moonDirection: Node< 'vec3' >, s
 }
 
 /**
+ * 地平线以下不用大气表。那一段射线立刻撞上地面，积分是黑的。
+ * 改用地平线同方位的天空颜色，越往下越暗。颜色跟着太阳走。
+ */
+function withGround(
+	color: Node< 'vec3' >,
+	skyView: StorageTexture,
+	viewHeight: Node< 'float' >,
+	sun: Node,
+	direction: Node< 'vec3' >,
+): Node< 'vec3' > {
+
+	const horizonDir = normalize( vec3( direction.x.add( 1e-5 ), max( direction.y, 0 ), direction.z ) );
+	const horizon = sampleSkyView( skyView, viewHeight, sun, horizonDir );
+	const depth = smoothstep( 0, - 0.5, direction.y );
+	const ground = horizon.mul( mix( 1, 0.4, depth ) );
+
+	return direction.y.lessThan( 0 ).select( ground, color );
+
+}
+
+/**
  * 构造天空颜色节点。
  *
  * 视线是片元世界坐标减去相机位置。天空盒对齐相机后，这个方向就是观察方向。
@@ -224,11 +245,43 @@ export function createSkyColorNode(
 	const moon = moonDirection as Node< 'vec3' >;
 	const sky = sampleSkyView( skyView, viewHeight, sun, direction );
 
-	return sky
+	return withGround(
+		sky
+			.add( moonlitSky( direction, moon, starIntensity ) )
+			.add( stars( direction, sun, starIntensity, time ) )
+			.add( moonDisk( direction, moon, starIntensity ) )
+			.add( sunDisk( direction, sun, transmittance, viewHeight ) ),
+		skyView,
+		viewHeight,
+		sun,
+		direction,
+	);
+
+}
+
+/** 环境贴图里的星光比例。Tidewater 反射天空用 `0.08`，避免亮星在粗糙反射里闪。 */
+const STAR_REFLECTION = 0.08;
+
+/**
+ * 给环境贴图用的天空。大气和月光夜空保留，没有太阳盘和月亮盘，恒星乘 {@link STAR_REFLECTION}。
+ * 视锥里的云不在这里。
+ */
+export function createReflectionSkyColor(
+	skyView: StorageTexture,
+	viewHeight: Node< 'float' >,
+	sunDirection: Node,
+	moonDirection: Node,
+	starIntensity: Node< 'float' >,
+	time: Node< 'float' >,
+): Node< 'vec3' > {
+
+	const direction = normalize( positionWorld.sub( cameraPosition ) ) as Node< 'vec3' >;
+	const sun = sunDirection as Node< 'vec3' >;
+	const moon = moonDirection as Node< 'vec3' >;
+
+	return sampleSkyView( skyView, viewHeight, sun, direction )
 		.add( moonlitSky( direction, moon, starIntensity ) )
-		.add( stars( direction, sun, starIntensity, time ) )
-		.add( moonDisk( direction, moon, starIntensity ) )
-		.add( sunDisk( direction, sun, transmittance, viewHeight ) );
+		.add( stars( direction, sun, starIntensity, time ).mul( STAR_REFLECTION ) );
 
 }
 
@@ -273,6 +326,12 @@ export function createSkyColorWithClouds(
 	const cloud = sampleSkyPro( view, camera, direction );
 	const diskCover = cloud.a.mul( smoothstep( 0.004, 0.04, cloud.a ) );
 
-	return sky.mul( cloud.a ).add( disk.mul( diskCover ) ).add( cloud.rgb );
+	return withGround(
+		sky.mul( cloud.a ).add( disk.mul( diskCover ) ).add( cloud.rgb ),
+		skyView,
+		viewHeight,
+		sun,
+		direction,
+	);
 
 }

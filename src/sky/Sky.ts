@@ -32,7 +32,7 @@ import { createIrradiance } from './atmosphere/irradiance';
 import { createMultiScatteringLut } from './atmosphere/multiScattering';
 import { createSkyViewLut } from './atmosphere/skyView';
 import { createTransmittanceLut } from './atmosphere/transmittance';
-import { createSkyColorNode, createSkyColorWithClouds } from './composite/background';
+import { createReflectionSkyColor, createSkyColorNode, createSkyColorWithClouds } from './composite/background';
 import { SkyProField } from './clouds/skypro';
 
 /**
@@ -326,6 +326,12 @@ export class Sky extends Mesh {
 	/** 不含云的颜色。关掉云时换回它。 */
 	private clearNode: Node< 'vec3' >;
 
+	/**
+	 * 环境贴图用的天空。没有太阳盘、月亮盘和视锥云，恒星更暗。
+	 * 和屏幕上的天空分开，避免海色和云被烤进反射。
+	 */
+	readonly reflectionNode: Node< 'vec3' >;
+
 	/** 叠了全景云的颜色。云关掉后丢掉，下次打开再造。 */
 	private cloudyNode: Node< 'vec3' > | null = null;
 
@@ -405,6 +411,14 @@ export class Sky extends Mesh {
 			this.timeNode,
 		);
 		this.colorNode = this.clearNode;
+		this.reflectionNode = createReflectionSkyColor(
+			this.skyView,
+			this.skyViewLut.viewHeight,
+			this.sunDirectionNode,
+			this.moonDirectionNode,
+			this.starIntensityNode,
+			this.timeNode,
+		);
 		material.colorNode = this.colorNode;
 
 	}

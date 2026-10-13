@@ -1,8 +1,10 @@
 /**
- * 调色。跟在曝光后面、输出前面。
+ * 调色。跟在自动曝光后面、输出前面。
  *
- * 暖一点、饱和度 1.06、对比度 1.04、暗角 0.28、颗粒 0.012。和 Tidewater 的默认值一样。
- * 后面是 ACES，固定曝光 `0.55`，再转到 sRGB，最后加 ±1/255 的抖动。
+ * 这几项对应 Tidewater 的 `PostParams`，运行时改 `.value`。
+ * 暖色 `0.02`、饱和度 `1.06`、对比度 `1.04`、暗角 `0.28`、颗粒 `0.012`。
+ * `exposure` 对应 `frame.exposure`，默认 `0.55`。Tidewater 的界面按 EV 写成 `0.55 * 2^ev`。
+ * 后面是 ACES、sRGB，最后加 ±1/255 的抖动。
  */
 
 import { type Node } from 'three/webgpu';
@@ -26,12 +28,17 @@ import {
 	viewportCoordinate,
 } from 'three/tsl';
 
-const WARMTH = 0.02;
-const SATURATION = 1.06;
-const CONTRAST = 1.04;
-const VIGNETTE = 0.28;
-const GRAIN = 0.012;
-const EXPOSURE = 0.55;
+/** Tidewater `PostParams` 里的调色项。 */
+export const gradeParams = {
+	warmth: uniform( 0.02 ),
+	saturation: uniform( 1.06 ),
+	contrast: uniform( 1.04 ),
+	vignette: uniform( 0.28 ),
+	grain: uniform( 0.012 ),
+};
+
+/** Tidewater 的 `frame.exposure`。 */
+export const exposure = uniform( 0.55 );
 
 const frameIndex = uniform( 0, 'uint' );
 
@@ -75,18 +82,19 @@ export function grade( color: Node< 'vec4' > ): Node< 'vec4' > {
 
 	return Fn( () => {
 
-		const warmed = color.rgb.mul( vec3( 1 + WARMTH, 1, 1 - WARMTH ) );
+		const warmth = gradeParams.warmth;
+		const warmed = color.rgb.mul( vec3( warmth.add( 1 ), 1, float( 1 ).sub( warmth ) ) );
 		const gray = luminance( warmed );
-		const saturated = mix( vec3( gray ), warmed, SATURATION );
-		const contrasted = pow( max( saturated, vec3( 0, 0, 0 ) ).div( 0.18 ), vec3( CONTRAST ) ).mul( 0.18 );
+		const saturated = mix( vec3( gray ), warmed, gradeParams.saturation );
+		const contrasted = pow( max( saturated, vec3( 0, 0, 0 ) ).div( 0.18 ), vec3( gradeParams.contrast ) ).mul( 0.18 );
 		const edge = screenUV.sub( 0.5 ).mul( vec2( 1, 0.8 ) );
-		const vignette = float( 1 ).sub( smoothstep( 0.25, 0.75, length( edge ) ).mul( VIGNETTE ) );
+		const vignette = float( 1 ).sub( smoothstep( 0.25, 0.75, length( edge ) ).mul( gradeParams.vignette ) );
 		const shaded = contrasted.mul( vignette );
 		const pixel = uvec2( viewportCoordinate );
 		const frame = frameIndex;
 		const noise = postHash( pixel, frame ).add( postHash( pixel.add( uvec2( uint( 7919 ), uint( 104729 ) ) ), frame ) ).sub( 1 ).mul( 0.5 );
-		const graded = shaded.add( shaded.mul( noise.mul( GRAIN ) ) );
-		const mapped = acesFilmicToneMapping( graded, float( EXPOSURE ) ) as Node< 'vec3' >;
+		const graded = shaded.add( shaded.mul( noise.mul( gradeParams.grain ) ) );
+		const mapped = acesFilmicToneMapping( graded, exposure ) as Node< 'vec3' >;
 		const dither = postHash( pixel.add( uvec2( uint( 31337 ), uint( 271 ) ) ), frame )
 			.add( postHash( pixel.add( uvec2( uint( 1013 ), uint( 65537 ) ) ), frame ) )
 			.sub( 1 )

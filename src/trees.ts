@@ -302,7 +302,7 @@ function loadSpecies(): Promise<Mesh[][]> {
 
 }
 
-function scatter( parts: Mesh[], trees: Tree[] ): InstancedMesh[] {
+function fill( parts: Mesh[], trees: Tree[], castShadow: boolean ): InstancedMesh[] {
 
 	const dummy = new Object3D();
 	const position = new Vector3();
@@ -314,7 +314,7 @@ function scatter( parts: Mesh[], trees: Tree[] ): InstancedMesh[] {
 
 		const instanced = new InstancedMesh( part.geometry, part.material, trees.length );
 		instanced.frustumCulled = false;
-		instanced.castShadow = true;
+		instanced.castShadow = castShadow;
 		instanced.receiveShadow = true;
 
 		for ( let i = 0; i < trees.length; i ++ ) {
@@ -333,6 +333,26 @@ function scatter( parts: Mesh[], trees: Tree[] ): InstancedMesh[] {
 	}
 
 	return meshes;
+
+}
+
+function scatter( parts: Mesh[], trees: Tree[], castRadius: number ): InstancedMesh[] {
+
+	const near: Tree[] = [];
+	const far: Tree[] = [];
+	const radiusSq = castRadius * castRadius;
+
+	for ( const tree of trees ) {
+
+		if ( tree.x * tree.x + tree.z * tree.z <= radiusSq ) near.push( tree );
+		else far.push( tree );
+
+	}
+
+	return [
+		...( near.length ? fill( parts, near, true ) : [] ),
+		...( far.length ? fill( parts, far, false ) : [] ),
+	];
 
 }
 
@@ -361,7 +381,7 @@ export type Forest = {
 	dispose(): void;
 };
 
-export function createForest(): Promise< Forest > {
+export function createForest( castRadius: number ): Promise< Forest > {
 
 	const map = loadImage( '/trees/distribution.webp' ).then( ( image ) => {
 
@@ -377,7 +397,7 @@ export function createForest(): Promise< Forest > {
 		for ( let kind = 0; kind < species.length; kind ++ ) {
 
 			const placed = trees.filter( ( tree ) => tree.kind === kind );
-			for ( const mesh of scatter( species[ kind ], placed ) ) group.add( mesh );
+			for ( const mesh of scatter( species[ kind ], placed, castRadius ) ) group.add( mesh );
 
 		}
 
@@ -386,15 +406,21 @@ export function createForest(): Promise< Forest > {
 			update() {},
 			dispose() {
 
+				const geometries = new Set<BufferGeometry>();
+				const materials = new Set<Material>();
+
 				group.traverse( ( obj ) => {
 
 					const mesh = obj as InstancedMesh;
 					if ( ! mesh.isInstancedMesh ) return;
-					mesh.geometry.dispose();
-					const materials = Array.isArray( mesh.material ) ? mesh.material : [ mesh.material ];
-					for ( const material of materials ) disposeMaterial( material );
+					geometries.add( mesh.geometry );
+					const list = Array.isArray( mesh.material ) ? mesh.material : [ mesh.material ];
+					for ( const material of list ) materials.add( material );
 
 				} );
+
+				for ( const geometry of geometries ) geometry.dispose();
+				for ( const material of materials ) disposeMaterial( material );
 
 			},
 		};

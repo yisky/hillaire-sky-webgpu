@@ -1,7 +1,7 @@
 /**
  * 泛光。Jimenez 2014 那套：半分辨率开始五级缩小，再逐级叠回来。
  *
- * 第一级用 Karis 平均，避免太阳这种单个亮点闪烁。结果乘 `0.05` 加回画面。
+ * 第一级用 Karis 平均，避免太阳这种单个亮点闪烁。加回画面时乘 `bloom`，默认 `0.05`。
  * `meter` 是缩到 `1/16` 的那一级，自动曝光读它。
  */
 
@@ -19,10 +19,9 @@ import {
 	type Texture,
 	type WebGPURenderer,
 } from 'three/webgpu';
-import { Fn, float, int, luminance, max, texture, textureSize, uv, vec2, vec4 } from 'three/tsl';
+import { Fn, float, int, luminance, max, texture, textureSize, uniform, uv, vec2, vec4 } from 'three/tsl';
 
 const SCALES = [ 0.5, 0.25, 0.125, 0.0625, 0.03125 ];
-const STRENGTH = 0.05;
 
 let quad: QuadMesh | null = null;
 const size = new Vector2();
@@ -135,6 +134,9 @@ export class SceneBloom extends TempNode {
 	/** 缩到 1/16 的一级，给自动曝光计量。 */
 	readonly meter: Texture;
 
+	/** 加回画面的倍数。Tidewater `post.params.bloom`，默认 `0.05`。 */
+	readonly bloom = uniform( 0.05 );
+
 	private readonly down: RenderTarget[];
 
 	private readonly up: RenderTarget[];
@@ -174,7 +176,7 @@ export class SceneBloom extends TempNode {
 
 	setup(): Node {
 
-		return texture( this.up[ 0 ].texture ).mul( STRENGTH );
+		return texture( this.up[ 0 ].texture ).mul( this.bloom );
 
 	}
 

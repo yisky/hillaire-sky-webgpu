@@ -1,8 +1,9 @@
 /**
  * 自动曝光。单独的后期组件，不读天空模块。
  *
- * 整幅画面乘同一个倍数，把中心加权的对数平均亮度慢慢拉向 `0.25`。
- * 偏暗时加得快（每秒 `1.6`），偏亮时减得慢（每秒 `1.1`）。倍数限制在 `0.6` 到 `6`。
+ * 整幅画面乘同一个倍数，把中心加权的对数平均亮度慢慢拉向 `ref`。
+ * 偏暗时按 `up` 加快，偏亮时按 `down` 减慢。倍数限制在 `min` 到 `max`。
+ * `enabled` 小于等于 `0.5` 时倍数保持 `1`。这几项运行时改 `.value`。
  * 太阳低于地平线时上限收到 `2`，夜空不会被拉成白天。阈值和天空里恒星出现的区间一致：
  * `-sun.y` 从 `0.02` 到 `0.18`。
  * 倍数晚一帧生效。计量读泛光缩到 `1/16` 的那张图，一个 256 线程的组把每个纹素都加一遍。
@@ -46,12 +47,6 @@ import {
 
 const GROUP = 256;
 const SPAN = 160;
-
-const REF = 0.25;
-const MIN = 0.6;
-const MAX = 6;
-const UP = 1.6;
-const DOWN = 1.1;
 const NIGHT_MAX = 2;
 
 export interface AutoExposureOptions {
@@ -74,7 +69,23 @@ export class AutoExposure {
 	/** 适应。场景画完后派发，下一帧才用新的倍数。 */
 	readonly adapt: ComputeNode;
 
-	private readonly sunDirection: Vector3;
+	/** 大于 `0.5` 才适应，否则倍数保持 `1`。Tidewater `autoExposure.enabled`。 */
+	readonly enabled = uniform( 1 );
+
+	/** 不需要修正的平均亮度。Tidewater 着色器里叫 `refLum`，因为 `ref` 是 WGSL 关键字。 */
+	readonly ref = uniform( 0.25 );
+
+	/** 倍数下限。Tidewater `autoExposure.min`。 */
+	readonly min = uniform( 0.6 );
+
+	/** 倍数上限。Tidewater `autoExposure.max`。夜里另收到 `2`。 */
+	readonly max = uniform( 6 );
+
+	/** 变亮的速度，单位 1/秒。Tidewater `autoExposure.up`。 */
+	readonly up = uniform( 1.6 );
+
+	/** 变暗的速度，单位 1/秒。Tidewater `autoExposure.down`。 */
+	readonly down = uniform( 1.1 );
 
 	private readonly dt = uniform( 1 / 60 );
 
@@ -84,8 +95,6 @@ export class AutoExposure {
 	 * @param options 场景颜色和太阳方向
 	 */
 	constructor( options: AutoExposureOptions ) {
-
-		this.sunDirection = options.sunDirection;
 
 		const attribute = new StorageBufferAttribute( new Float32Array( [ 1 ] ), 1 );
 		const written = storage( attribute, 'float', 1 );
@@ -130,6 +139,12 @@ export class AutoExposure {
 
 		const image = texture( color );
 		const dt = this.dt;
+		const enabled = this.enabled;
+		const ref = this.ref;
+		const min = this.min;
+		const exposureMax = this.max;
+		const up = this.up;
+		const down = this.down;
 		const sumL = workgroupArray( 'float', GROUP ) as unknown as { element( index: Node ): Node< 'float' > };
 		const sumW = workgroupArray( 'float', GROUP ) as unknown as { element( index: Node ): Node< 'float' > };
 
@@ -183,16 +198,16 @@ export class AutoExposure {
 			If( thread.equal( uint( 0 ) ), () => {
 
 				const average = exp2( sumL.element( uint( 0 ) ).div( max( sumW.element( uint( 0 ) ), 1e-4 ) ) );
-				const ratio = float( REF ).div( average );
+				const ratio = ref.div( average );
 				const partial = ratio.greaterThan( 1 ).select( pow( ratio, 0.8 ), ratio );
 				const night = smoothstep( 0.02, 0.18, sunDirection.y.negate() );
-				const cap = mix( MAX, NIGHT_MAX, night );
-				const target = partial.clamp( MIN, cap );
-				const rate = target.greaterThan( current ).select( UP, DOWN );
+				const cap = mix( exposureMax, NIGHT_MAX, night );
+				const target = partial.clamp( min, cap );
+				const rate = target.greaterThan( current ).select( up, down );
 				const step = float( 1 ).sub( exp( dt.mul( rate ).negate() ) );
 				const next = exp2( mix( log2( max( current, 1e-3 ) ), log2( target ), step ) );
 
-				current.assign( next );
+				current.assign( enabled.greaterThan( 0.5 ).select( next, float( 1 ) ) );
 
 			} );
 
