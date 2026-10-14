@@ -54,9 +54,6 @@ export interface AutoExposureOptions {
 	/** 场景通道的颜色。计量读它，不读已经加过炫光的结果。 */
 	color: Texture;
 
-	/** 指向太阳的世界方向。调用方原地修改即可。 */
-	sunDirection: Vector3;
-
 }
 
 /**
@@ -87,22 +84,24 @@ export class AutoExposure {
 	/** 变暗的速度，单位 1/秒。 */
 	readonly down = uniform( 1.1 );
 
+	/** 指向太阳的世界方向。每帧写 `.value`。夜里用 `-y` 收曝光上限。 */
+	readonly sunDirection = uniform( new Vector3( 0, 1, 0 ) );
+
 	private readonly dt = uniform( 1 / 60 );
 
 	private readonly factor: Node< 'float' >;
 
 	/**
-	 * @param options 场景颜色和太阳方向
+	 * @param options 场景颜色
 	 */
 	constructor( options: AutoExposureOptions ) {
 
 		const attribute = new StorageBufferAttribute( new Float32Array( [ 1 ] ), 1 );
 		const written = storage( attribute, 'float', 1 );
 		const read = storage( attribute, 'float', 1 ).toReadOnly();
-		const sunDirection = uniform( options.sunDirection ) as Node< 'vec3' >;
 
 		this.factor = read.element( 0 ) as Node< 'float' >;
-		this.adapt = this.createAdapt( written.element( 0 ) as Node< 'float' >, options.color, sunDirection );
+		this.adapt = this.createAdapt( written.element( 0 ) as Node< 'float' >, options.color );
 
 	}
 
@@ -119,6 +118,7 @@ export class AutoExposure {
 
 	/**
 	 * 写下这一帧的时间间隔。在画后期之前调用。
+	 * 夜里收上限用的太阳方向，调用前写好 {@link AutoExposure.sunDirection} 的 `.value`。
 	 *
 	 * @param delta 距上一帧的秒数
 	 */
@@ -133,9 +133,8 @@ export class AutoExposure {
 	 *
 	 * @param current 可写的倍数，初值是 `1`
 	 * @param color 场景颜色
-	 * @param sunDirection 指向太阳的方向
 	 */
-	private createAdapt( current: Node< 'float' >, color: Texture, sunDirection: Node< 'vec3' > ): ComputeNode {
+	private createAdapt( current: Node< 'float' >, color: Texture ): ComputeNode {
 
 		const image = texture( color );
 		const dt = this.dt;
@@ -200,7 +199,7 @@ export class AutoExposure {
 				const average = exp2( sumL.element( uint( 0 ) ).div( max( sumW.element( uint( 0 ) ), 1e-4 ) ) );
 				const ratio = ref.div( average );
 				const partial = ratio.greaterThan( 1 ).select( pow( ratio, 0.8 ), ratio );
-				const night = smoothstep( 0.02, 0.18, sunDirection.y.negate() );
+				const night = smoothstep( 0.02, 0.18, this.sunDirection.y.negate() );
 				const cap = mix( exposureMax, NIGHT_MAX, night );
 				const target = partial.clamp( min, cap );
 				const rate = target.greaterThan( current ).select( up, down );

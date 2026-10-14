@@ -17,6 +17,7 @@ import {
 	type Node,
 	type NodeFrame,
 	type Texture,
+	type TextureNode,
 	type WebGPURenderer,
 } from 'three/webgpu';
 import { Fn, float, int, luminance, max, texture, textureSize, uniform, uv, vec2, vec4 } from 'three/tsl';
@@ -28,8 +29,6 @@ const size = new Vector2();
 type RendererState = Parameters<typeof RendererUtils.restoreRendererState>[ 1 ];
 
 let saved: RendererState = {} as RendererState;
-
-type Sampler = Node & { sample( uv: Node ): Node; value?: Texture | null };
 
 function target( name: string ): RenderTarget {
 
@@ -51,7 +50,7 @@ function material( fragment: Node ): NodeMaterial {
 
 }
 
-function tap( map: Sampler, texel: Node< 'vec2' >, x: number, y: number ): Node< 'vec3' > {
+function tap( map: TextureNode, texel: Node< 'vec2' >, x: number, y: number ): Node< 'vec3' > {
 
 	const sampled = map.sample( uv().add( texel.mul( vec2( x, y ) ) ) ) as Node< 'vec4' >;
 
@@ -65,7 +64,7 @@ function karis( color: Node< 'vec3' > ): Node< 'vec3' > {
 
 }
 
-function downsample( map: Sampler, first: boolean ): Node {
+function downsample( map: TextureNode, first: boolean ): Node {
 
 	return Fn( () => {
 
@@ -108,7 +107,7 @@ function downsample( map: Sampler, first: boolean ): Node {
 
 }
 
-function upsample( small: Sampler, base: Sampler ): Node {
+function upsample( small: TextureNode, base: TextureNode ): Node {
 
 	return Fn( () => {
 
@@ -145,18 +144,18 @@ export class SceneBloom extends TempNode {
 
 	private readonly downNext: NodeMaterial;
 
-	private readonly downSource: Sampler;
+	private readonly downSource: TextureNode;
 
 	private readonly upPass: NodeMaterial;
 
-	private readonly upSmall: Sampler;
+	private readonly upSmall: TextureNode;
 
-	private readonly upBase: Sampler;
+	private readonly upBase: TextureNode;
 
 	/**
 	 * @param input 场景颜色
 	 */
-	constructor( input: Sampler ) {
+	constructor( input: TextureNode ) {
 
 		super( 'vec4' );
 
@@ -166,10 +165,10 @@ export class SceneBloom extends TempNode {
 		this.meter = this.down[ 3 ].texture;
 
 		this.downFirst = material( downsample( input, true ) );
-		this.downSource = texture( this.down[ 0 ].texture ) as Sampler;
+		this.downSource = texture( this.down[ 0 ].texture );
 		this.downNext = material( downsample( this.downSource, false ) );
-		this.upSmall = texture( this.down[ 4 ].texture ) as Sampler;
-		this.upBase = texture( this.down[ 3 ].texture ) as Sampler;
+		this.upSmall = texture( this.down[ 4 ].texture );
+		this.upBase = texture( this.down[ 3 ].texture );
 		this.upPass = material( upsample( this.upSmall, this.upBase ) );
 
 	}

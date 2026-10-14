@@ -90,15 +90,16 @@ function slider( label, value, min, max, step, format, log ) {
 	root.querySelector( '.tw-row' ).append( shown )
 	const toT = ( v ) => log ? clamp( Math.log( v / min ) / Math.log( max / min ), 0, 1 ) : ( v - min ) / ( max - min || 1 )
 	const fromT = ( t ) => log ? min * ( max / min ) ** t : min + t * ( max - min )
+	let current = value
 	const paint = ( next ) => {
-		const v = clamp( Math.round( next / step ) * step, min, max )
-		const t = toT( v )
+		current = clamp( Math.round( next / step ) * step, min, max )
+		const t = toT( current )
 		fill.style.width = `${ t * 100 }%`
 		thumb.style.left = `calc(7 * var(--tw-u) + (100% - 14 * var(--tw-u)) * ${ t })`
-		shown.textContent = format( v )
-		return v
+		shown.textContent = format( current )
+		return current
 	}
-	let current = paint( value )
+	paint( value )
 	const at = ( event ) => {
 		const rect = rail.getBoundingClientRect()
 		current = paint( fromT( clamp( ( event.clientX - rect.left ) / rect.width, 0, 1 ) ) )
@@ -430,6 +431,7 @@ export function createSettings() {
 	return {
 		sun,
 		get coverage() { return coverage.value },
+		setCoverage( value ) { coverage.paint( value ) },
 		get fog() { return fog.on },
 		get ev() { return ev.value },
 		get ao() { return ao.value },
@@ -441,6 +443,7 @@ export function createSettings() {
 		get grain() { return grain.value },
 		get camera() { return camera.value },
 		setCamera( mode ) { camera.paint( mode ) },
+		open,
 		dispose() { root.remove() },
 	}
 }

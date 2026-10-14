@@ -263,7 +263,7 @@ export function createSkyColorNode(
 const STAR_REFLECTION = 0.08;
 
 /**
- * 给环境贴图用的天空。大气和月光夜空保留，没有太阳盘和月亮盘，恒星乘 {@link STAR_REFLECTION}。
+ * 给 SkyProbe 用的天空。大气和月光夜空保留，没有太阳盘和月亮盘，恒星乘 {@link STAR_REFLECTION}。
  * 视锥里的云不在这里。
  */
 export function createReflectionSkyColor(

@@ -32,7 +32,7 @@ import { createIrradiance } from './atmosphere/irradiance';
 import { createMultiScatteringLut } from './atmosphere/multiScattering';
 import { createSkyViewLut } from './atmosphere/skyView';
 import { createTransmittanceLut } from './atmosphere/transmittance';
-import { createReflectionSkyColor, createSkyColorNode, createSkyColorWithClouds } from './composite/background';
+import { createSkyColorNode, createSkyColorWithClouds } from './composite/background';
 import { SkyProField } from './clouds/skypro';
 
 /**
@@ -114,6 +114,17 @@ export class Sky extends Mesh {
 	 * 纹素已乘场景照度，不含太阳盘。
 	 */
 	readonly skyView: StorageTexture;
+
+	/**
+	 * 写入天空视图表时的地心距离，单位 km。
+	 *
+	 * 探针采样同一张表时必须用这个高度。
+	 */
+	get viewHeight(): Node< 'float' > {
+
+		return this.skyViewLut.viewHeight;
+
+	}
 
 	/**
 	 * 真太阳方向，世界空间单位向量。
@@ -296,10 +307,10 @@ export class Sky extends Mesh {
 	/**
 	 * 夜深，`0` 到 `1`。太阳高度从 `-0.02` 降到 `-0.18` 时平滑打开，恒星和月亮用它。
 	 */
-	private readonly starIntensityNode = uniform( 0 );
+	readonly starIntensityNode = uniform( 0 );
 
 	/** 累计时间，单位秒。恒星闪烁用它，不参与查找表。 */
-	private readonly timeNode = uniform( 0 );
+	readonly timeNode = uniform( 0 );
 
 	private time = 0;
 
@@ -325,12 +336,6 @@ export class Sky extends Mesh {
 
 	/** 不含云的颜色。关掉云时换回它。 */
 	private clearNode: Node< 'vec3' >;
-
-	/**
-	 * 环境贴图用的天空。没有太阳盘、月亮盘和视锥云，恒星更暗。
-	 * 和屏幕上的天空分开，避免海色和云被烤进反射。
-	 */
-	readonly reflectionNode: Node< 'vec3' >;
 
 	/** 叠了全景云的颜色。云关掉后丢掉，下次打开再造。 */
 	private cloudyNode: Node< 'vec3' > | null = null;
@@ -411,14 +416,6 @@ export class Sky extends Mesh {
 			this.timeNode,
 		);
 		this.colorNode = this.clearNode;
-		this.reflectionNode = createReflectionSkyColor(
-			this.skyView,
-			this.skyViewLut.viewHeight,
-			this.sunDirectionNode,
-			this.moonDirectionNode,
-			this.starIntensityNode,
-			this.timeNode,
-		);
 		material.colorNode = this.colorNode;
 
 	}

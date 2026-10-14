@@ -1,16 +1,14 @@
 /**
- * 调色。跟在自动曝光后面、输出前面。
+ * 调色。跟在自动曝光后面，还在线性 HDR 里。
  *
  * 这几项运行时改 `.value`。
  * 暖色 `0.02`、饱和度 `1.06`、对比度 `1.04`、暗角 `0.28`、颗粒 `0.012`。
- * `exposure` 默认 `0.55`。界面按 EV 写成 `0.55 * 2^ev`。
- * 后面是 ACES、sRGB，最后加 ±1/255 的抖动。
+ * ACES、sRGB、抖动在 `display.ts`。
  */
 
 import { type Node } from 'three/webgpu';
 import {
 	Fn,
-	acesFilmicToneMapping,
 	float,
 	length,
 	luminance,
@@ -37,12 +35,9 @@ export const gradeParams = {
 	grain: uniform( 0.012 ),
 };
 
-/** 色调映射前的曝光倍数。 */
-export const exposure = uniform( 0.55 );
-
 const frameIndex = uniform( 0, 'uint' );
 
-/** 每帧加一，颗粒和抖动才不会停在原地。 */
+/** 每帧加一，颗粒才不会停在原地。 */
 export function updateGrade(): void {
 
 	frameIndex.value = ( Number( frameIndex.value ) + 1 ) >>> 0;
@@ -63,21 +58,7 @@ function postHash( pixel: Node< 'uvec2' >, frame: Node< 'uint' > ): Node< 'float
 
 }
 
-function linearToSrgb( color: Node< 'vec3' > ): Node< 'vec3' > {
-
-	const encoded = color.pow( float( 1 ).div( 2.4 ) ).mul( 1.055 ).sub( 0.055 );
-	const linear = color.mul( 12.92 );
-	const cutoff = float( 0.0031308 );
-
-	return vec3(
-		color.x.lessThanEqual( cutoff ).select( linear.x, encoded.x ),
-		color.y.lessThanEqual( cutoff ).select( linear.y, encoded.y ),
-		color.z.lessThanEqual( cutoff ).select( linear.z, encoded.z ),
-	);
-
-}
-
-/** 暖色、饱和、对比、暗角、颗粒，然后 ACES、sRGB 和抖动。 */
+/** 暖色、饱和、对比、暗角、颗粒。 */
 export function grade( color: Node< 'vec4' > ): Node< 'vec4' > {
 
 	return Fn( () => {
@@ -91,16 +72,9 @@ export function grade( color: Node< 'vec4' > ): Node< 'vec4' > {
 		const vignette = float( 1 ).sub( smoothstep( 0.25, 0.75, length( edge ) ).mul( gradeParams.vignette ) );
 		const shaded = contrasted.mul( vignette );
 		const pixel = uvec2( viewportCoordinate );
-		const frame = frameIndex;
-		const noise = postHash( pixel, frame ).add( postHash( pixel.add( uvec2( uint( 7919 ), uint( 104729 ) ) ), frame ) ).sub( 1 ).mul( 0.5 );
-		const graded = shaded.add( shaded.mul( noise.mul( gradeParams.grain ) ) );
-		const mapped = acesFilmicToneMapping( graded, exposure ) as Node< 'vec3' >;
-		const dither = postHash( pixel.add( uvec2( uint( 31337 ), uint( 271 ) ) ), frame )
-			.add( postHash( pixel.add( uvec2( uint( 1013 ), uint( 65537 ) ) ), frame ) )
-			.sub( 1 )
-			.div( 255 );
+		const noise = postHash( pixel, frameIndex ).add( postHash( pixel.add( uvec2( uint( 7919 ), uint( 104729 ) ) ), frameIndex ) ).sub( 1 ).mul( 0.5 );
 
-		return vec4( linearToSrgb( mapped ).add( dither ), 1 );
+		return vec4( shaded.add( shaded.mul( noise.mul( gradeParams.grain ) ) ), color.a );
 
 	} )() as Node< 'vec4' >;
 

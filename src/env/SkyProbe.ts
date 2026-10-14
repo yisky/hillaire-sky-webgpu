@@ -1,8 +1,8 @@
 /**
- * 把天空画进环境贴图，供标准材质的漫反射和粗糙度反射使用。
+ * 把天空烤进环境贴图，给标准材质做漫反射和镜面反射。
  *
- * 只画一只内表面天空盒，不画建筑和树。太阳方向变化超过 0.004 弧度才重做。
- * 云不在这张图里，所以太阳不动就不用刷新。
+ * 只画一只内表面盒子，不画建筑和树。没有太阳盘、月亮盘和视锥云，恒星更暗。
+ * 太阳方向变化超过 0.004 弧度才重烤。云不在这张图里。
  */
 
 import {
@@ -18,11 +18,12 @@ import {
 } from 'three/webgpu';
 
 import type { Sky } from '../sky';
+import { createReflectionSkyColor } from '../sky/composite/background';
 
 const SIZE = 128;
 const SUN_MOVE = 0.004;
 
-export class SkyEnvironment {
+export class SkyProbe {
 
 	private readonly pmrem: PMREMGenerator;
 
@@ -46,7 +47,14 @@ export class SkyEnvironment {
 		material.side = BackSide;
 		material.depthWrite = false;
 		material.fog = false;
-		material.colorNode = sky.reflectionNode;
+		material.colorNode = createReflectionSkyColor(
+			sky.skyView,
+			sky.viewHeight,
+			sky.sunDirectionNode,
+			sky.moonDirectionNode,
+			sky.starIntensityNode,
+			sky.timeNode,
+		);
 
 		this.box = new Mesh( new BoxGeometry( 1, 1, 1 ), material );
 		this.box.frustumCulled = false;

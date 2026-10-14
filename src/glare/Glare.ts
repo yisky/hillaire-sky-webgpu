@@ -6,10 +6,11 @@
  * 可见度在 GPU 上量一次：太阳圆盘上 24 个点，深度仍是清除值的算露出来，
  * 再乘云的透射、太阳高度和是否在画内。结果按 `1 - exp(-14 dt)` 跟上。
  * 深度清除值是 `1`。反向深度下天空是 `0`，这里按正向深度反过来比。
- * 太阳落到 `-0.07` 以下后，光源颜色换成月光。
+ * 太阳落下后炫光跟着灭，不接月亮。
  */
 
 import {
+	Color,
 	PerspectiveCamera,
 	StorageBufferAttribute,
 	Vector2,
@@ -71,27 +72,12 @@ const forward = new Vector3();
 const bufferSize = new Vector2();
 
 /**
- * 构造炫光时的输入。太阳向量和颜色由调用方每帧写好，本组件不拥有天空。
+ * 构造炫光时的输入。太阳方向、颜色、亮度是实例上的 uniform，构造之后写 `.value`。
  */
 export interface GlareOptions {
 
 	/** 场景通道的深度纹理。清除值 `1` 表示这一像素没有物体。 */
 	depth: Texture;
-
-	/** 指向太阳的世界方向。调用方原地修改即可。 */
-	sunDirection: Vector3;
-
-	/** 太阳颜色。通常是大气透射。 */
-	sunColor: Node;
-
-	/** 太阳亮度。落到地平线下后趋近 `0`，炫光跟着灭。 */
-	sunIntensity: Node;
-
-	/** 月光颜色。太阳高度低于 `-0.07` 时换成它。 */
-	moonColor: Node;
-
-	/** 月光亮度。 */
-	moonIntensity: Node;
 
 	/** 外面持有的体积云。没有时不乘透射。 */
 	clouds: SkyProField | null;
@@ -112,11 +98,18 @@ export class Glare {
 	/** 总强度。默认 `1`。 */
 	readonly strength = uniform( 1 );
 
+	/** 指向太阳的世界方向。每帧写 `.value`。 */
+	readonly sunDirection = uniform( new Vector3( 0, 1, 0 ) );
+
+	/** 太阳颜色。每帧写 `.value`。 */
+	readonly sunColor = uniform( new Color( 1, 1, 1 ) );
+
+	/** 太阳亮度。落到地平线下后趋近 `0`，炫光跟着灭。每帧写 `.value`。 */
+	readonly sunIntensity = uniform( 0 );
+
 	private readonly depth: Texture;
 
 	private readonly clouds: GlareOptions[ 'clouds' ];
-
-	private readonly sunDirection: Vector3;
 
 	private readonly sunUV = uniform( new Vector2( 0.5, 0.5 ) );
 
@@ -133,28 +126,19 @@ export class Glare {
 	private readonly flare: Node< 'vec3' >;
 
 	/**
-	 * @param options 场景深度和太阳
+	 * @param options 场景深度和云
 	 */
 	constructor( options: GlareOptions ) {
 
 		this.depth = options.depth;
 		this.clouds = options.clouds;
-		this.sunDirection = options.sunDirection;
 
 		const attribute = new StorageBufferAttribute( 1, 1 );
 		const written = storage( attribute, 'float', 1 );
 		const read = storage( attribute, 'float', 1 ).toReadOnly();
-		const sunDirection = uniform( options.sunDirection );
 
-		this.visibility = this.createVisibility( written.element( 0 ) as Node< 'float' >, sunDirection as Node< 'vec3' > );
-		this.flare = this.createFlare(
-			read.element( 0 ) as Node< 'float' >,
-			options.sunColor as Node< 'vec3' >,
-			options.sunIntensity as Node< 'float' >,
-			options.moonColor as Node< 'vec3' >,
-			options.moonIntensity as Node< 'float' >,
-			sunDirection as Node< 'vec3' >,
-		);
+		this.visibility = this.createVisibility( written.element( 0 ) as Node< 'float' > );
+		this.flare = this.createFlare( read.element( 0 ) as Node< 'float' > );
 
 	}
 
@@ -170,7 +154,9 @@ export class Glare {
 	}
 
 	/**
-	 * 写下这一帧的太阳屏幕位置。在画后期之前调用。
+	 * 按当前 {@link Glare.sunDirection} 写下太阳的屏幕位置和圆盘像素半径。
+	 * 调用前先写好 `sunDirection`、`sunColor`、`sunIntensity` 的 `.value`。
+	 * 只接透视相机：圆盘大小用 `fov`。
 	 *
 	 * @param renderer 用来读绘制缓冲高度
 	 * @param camera 当前透视相机
@@ -178,12 +164,13 @@ export class Glare {
 	 */
 	update( renderer: WebGPURenderer, camera: PerspectiveCamera, delta: number ): void {
 
+		const sun = this.sunDirection.value;
 		renderer.getDrawingBufferSize( bufferSize );
-		sunPoint.copy( camera.position ).addScaledVector( this.sunDirection, 1000 );
+		sunPoint.copy( camera.position ).addScaledVector( sun, 1000 );
 		sunNdc.copy( sunPoint ).project( camera );
 		forward.set( 0, 0, - 1 ).applyQuaternion( camera.quaternion );
 
-		const ahead = forward.dot( this.sunDirection ) > 0.05;
+		const ahead = forward.dot( sun ) > 0.05;
 		const edge = Math.max( Math.abs( sunNdc.x ), Math.abs( sunNdc.y ) );
 
 		this.sunUV.value.set( sunNdc.x * 0.5 + 0.5, 0.5 - sunNdc.y * 0.5 );
@@ -199,9 +186,8 @@ export class Glare {
 	 * 量太阳圆盘有多少露在外面。
 	 *
 	 * @param current 可写的可见度
-	 * @param sunDirection 指向太阳的方向
 	 */
-	private createVisibility( current: Node< 'float' >, sunDirection: Node< 'vec3' > ): ComputeNode {
+	private createVisibility( current: Node< 'float' > ): ComputeNode {
 
 		const depth = texture( this.depth );
 		const sunUV = this.sunUV;
@@ -227,8 +213,8 @@ export class Glare {
 
 			}
 
-			const up = smoothstep( - 0.02, 0.04, sunDirection.y );
-			const cloudT = this.cloudTransmittance( sunDirection );
+			const up = smoothstep( - 0.02, 0.04, this.sunDirection.y );
+			const cloudT = this.cloudTransmittance( this.sunDirection as Node< 'vec3' > );
 			const target = sky.div( TAPS ).mul( cloudT ).mul( up ).mul( inView );
 
 			current.assign( mix( current, target, float( 1 ).sub( exp( dt.mul( - 14 ) ) ) ) );
@@ -240,21 +226,9 @@ export class Glare {
 	/**
 	 * 这一像素要加上的炫光。可见度为 `0` 时结果是黑。
 	 *
-	 * @param read 只读的可见度
-	 * @param sunColor 太阳颜色
-	 * @param sunIntensity 太阳亮度
-	 * @param moonColor 月光颜色
-	 * @param moonIntensity 月光亮度
-	 * @param sunDirection 真太阳方向
+	 * @param vis 只读的可见度
 	 */
-	private createFlare(
-		vis: Node< 'float' >,
-		sunColor: Node< 'vec3' >,
-		sunIntensity: Node< 'float' >,
-		moonColor: Node< 'vec3' >,
-		moonIntensity: Node< 'float' >,
-		sunDirection: Node< 'vec3' >,
-	): Node< 'vec3' > {
+	private createFlare( vis: Node< 'float' > ): Node< 'vec3' > {
 
 		const sunUV = this.sunUV;
 		const aspect = this.aspect;
@@ -267,7 +241,7 @@ export class Glare {
 			const flipY = vec2( 1, - 1 );
 			const p = screenUV.sub( 0.5 ).mul( axes ).mul( flipY );
 			const s = sunUV.sub( 0.5 ).mul( axes ).mul( flipY );
-			const key = sunDirection.y.greaterThan( - 0.07 ).select( sunColor.mul( sunIntensity ), moonColor.mul( moonIntensity ) );
+			const key = this.sunColor.mul( this.sunIntensity );
 			const light = key.mul( vis ).mul( strength ).mul( 0.02 );
 
 			let ghosts: Node< 'vec3' > = vec3( 0, 0, 0 );
