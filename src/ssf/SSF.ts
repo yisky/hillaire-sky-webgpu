@@ -1,64 +1,118 @@
-import { Color, MathUtils, Matrix4, NodeMaterial, Vector2, Vector3 } from 'three/webgpu'
-import type { Camera, ColorRepresentation, Node, NodeBuilder, OrthographicCamera, PerspectiveCamera } from 'three/webgpu'
+/**
+ * 屏幕空间高度雾。单独的后期组件，不读天空模块。
+ *
+ * 从场景深度还原每个像素的世界坐标，沿相机视线对指数高度雾做解析积分，
+ * 再按透射率把雾色、定向散射和场景颜色混在一起。
+ * 密度随高度按 2 的指数衰减。相机前 `fogStartDistance` 那段不进积分。
+ * 噪声只扰动雾面高度，地面在命中点采样，天空改到视线与雾面的交点，避免远裁剪面上噪成细斑。
+ *
+ * 接法跟泛光、炫光、自动曝光一样走 {@link TempNode}：图里直接用这个节点，`setup` 返回混过雾的颜色。
+ * `updateBefore` 把场景相机的矩阵和近远裁绑到自己的 uniform。
+ * 后期画全屏四边形时 `frame.camera` 是正交相机，还原世界坐标必须用构造时传入的那台。
+ * 雾在线性空间里混合。ACES、sRGB、抖动在后面的显示变换里做。
+ */
+
+import { Color, MathUtils, Matrix4, NodeUpdateType, TempNode, Vector2, Vector3 } from 'three/webgpu'
+import type { Camera, ColorRepresentation, Node, NodeBuilder, NodeFrame, OrthographicCamera, PerspectiveCamera } from 'three/webgpu'
 import { Fn, abs, clamp, dot, exp2, float, getViewPosition, inverseSqrt, length, logarithmicDepthToViewZ, max, min, mix, pow, saturate, select, time, uniform, uv, vec2, vec3, vec4, viewZToPerspectiveDepth } from 'three/tsl'
 import { simplexNoise3D } from './simplexNoise3D'
 
-// ln(2)。密度和透射率都以 2 为底，对 2^x 积分会出现 1 / ln(2) 系数
+/** ln(2)。密度和透射率都以 2 为底，对 2^x 积分会出现 1 / ln(2) 系数。 */
 const LN2 = Math.LN2
 
-// 高度差折算后的指数差小于该值时，按均匀密度处理，避免 ( 1 - 2^-x ) / x 在 x → 0 时出现 0 / 0
+/** 高度差折算后的指数差小于该值时，按均匀密度处理，避免 ( 1 - 2^-x ) / x 在 x → 0 时出现 0 / 0。 */
 const UNIFORM_DENSITY_THRESHOLD = 0.01
 
-// 指数上限。float32 的 2^x 在 x 约为 128 时溢出为 Inf，留出余量
+/** 指数上限。float32 的 2^x 在 x 约为 128 时溢出为 Inf，留出余量。 */
 const MAX_EXPONENT = 126.0
 
-// 相机到像素距离平方的下限。小于它时视为与相机重合，直接输出原色
+/** 相机到像素距离平方的下限。小于它时视为与相机重合，直接输出原色。 */
 const MIN_DISTANCE_SQUARED = 1e-6
 
-// viewZ 为负。只有视线深度进入远平面最后 0.1% 的像素才改噪声采样点
+/** viewZ 为负。只有视线深度进入远平面最后 0.1% 的像素才改噪声采样点。 */
 const FAR_VIEW_Z_LIMIT = 0.999
 
-// 天空噪声沿雾面的最远距离，单位是噪声周期。采样坐标乘 noiseScale 后，一个周期约 1 / noiseScale 米
+/** 天空噪声沿雾面的最远距离，单位是噪声周期。一个周期约 1 / noiseScale 米。 */
 const NOISE_HORIZON_WAVELENGTHS = 2.0
 
-// 视线几乎平行于坐标轴时避免除零
+/** 视线几乎平行于坐标轴时避免除零。 */
 const RAY_AXIS_EPSILON = 1e-4
 
+/** 雾的可调项。构造时写入，之后改对应 setter，不重建节点。 */
 export interface SSFParams {
+
+	/** 是否混雾。关掉时输出场景原色。 */
 	enabled?: boolean
+
+	/** 雾色。传入 sRGB，`Color.set` 会转到线性工作空间。 */
 	fogColor?: ColorRepresentation
+
+	/** 雾的最大不透明度。透射率不会低于 `1 - 这个值`。 */
 	fogMaxOpacity?: number
+
+	/** 雾面高度处的密度。 */
 	fogDensity?: number
+
+	/** 雾面高度，世界坐标 Y。 */
 	fogHeight?: number
+
+	/** 高度衰减。每升高 `1 / value` 个单位，密度减半。`0` 是均匀雾。 */
 	fogHeightFalloff?: number
+
+	/** 相机前这段距离不进积分。 */
 	fogStartDistance?: number
+
+	/** 噪声对雾面高度的最大扰动幅度。 */
 	noiseStrength?: number
+
+	/** 噪声频率。越小团块越大。 */
 	noiseScale?: number
+
+	/** 噪声沿世界 X、Z 的流动速度。 */
 	noiseSpeed?: Vector2
+
+	/** 定向光传播方向。光从正上方射下时为 `(0, -1, 0)`。 */
 	inscatteringLightDirection?: Vector3
+
+	/** 定向散射颜色。 */
 	directionalInscatteringColor?: ColorRepresentation
+
+	/** 定向散射聚焦指数。越大，光晕越窄。 */
 	directionalInscatteringExponent?: number
+
+	/** 定向散射开始计算的距离。 */
 	directionalInscatteringStartDistance?: number
+
 }
 
 /**
- * 屏幕空间高度雾（Screen Space Fog）。
- *
- * 从场景深度重建每个像素的世界坐标，沿相机视线对指数高度雾密度做解析积分，再按透射率混合雾色、定向散射和场景颜色。
- * 计算写在 TSL 节点里，赋给 NodeMaterial.fragmentNode。RenderPipeline 用全屏四边形画这个材质。
- * 雾在线性空间里混合。色调映射不在这里做：管线默认用 renderOutput 包住 outputNode，内部创建 ToneMappingNode，在雾之后做 ACES。
+ * 构造雾时的输入。雾色、密度这些运行时改 setter，不用重建节点。
  */
-export class SSF {
+export interface SSFOptions extends SSFParams {
 
-	/** 全屏四边形使用的材质。fragmentNode 就是雾化后的颜色。 */
-	readonly material = new NodeMaterial()
+	/** 已经叠过泛光的场景颜色。`setup` 在它上面混雾。 */
+	color: Node
+
+	/** 场景通道的深度。用来还原每个像素的世界坐标。 */
+	depth: Node
 
 	/**
-	 * 交给 RenderPipeline 的输出节点，和 material.fragmentNode 是同一个节点。
-	 * 管线会再包一层 renderOutput，所以这里不要自己做色调映射。
+	 * 场景相机。后期画全屏四边形时 `frame.camera` 是正交相机，
+	 * 还原世界坐标必须用这一台。
 	 */
-	readonly outputNode: Node
+	camera: Camera
 
+}
+
+/**
+ * 屏幕空间高度雾。
+ *
+ * 构造时传入叠过泛光的颜色、场景深度和透视相机。炫光的输入就是这个节点。
+ * 每帧改雾色、密度这些 setter，再 `pipeline.render()`。没有单独的 compute。
+ */
+export class SSF extends TempNode {
+
+	/** 是否混雾。关掉时输出场景原色。 */
 	set enabled( value: boolean ) {
 
 		this._enabled.value = value
@@ -71,152 +125,194 @@ export class SSF {
 
 	}
 
+	/** 雾色。传入 sRGB，写入时转到线性工作空间。 */
 	set fogColor( value: ColorRepresentation ) {
 
 		this._fogColor.value.set( value )
 
 	}
 
+	/** 雾的最大不透明度，钳在 `0..1`。 */
 	set fogMaxOpacity( value: number ) {
 
 		this._fogMaxOpacity.value = MathUtils.clamp( value, 0.0, 1.0 )
 
 	}
 
+	/** 雾面高度处的密度。 */
 	set fogDensity( value: number ) {
 
 		this._fogDensity.value = value
 
 	}
 
+	/** 雾面高度，世界坐标 Y。 */
 	set fogHeight( value: number ) {
 
 		this._fogHeight.value = value
 
 	}
 
+	/** 高度衰减。每升高 `1 / value` 个单位，密度减半。 */
 	set fogHeightFalloff( value: number ) {
 
 		this._fogHeightFalloff.value = value
 
 	}
 
+	/** 相机前这段距离不进积分。 */
 	set fogStartDistance( value: number ) {
 
 		this._fogStartDistance.value = value
 
 	}
 
+	/** 噪声对雾面高度的最大扰动幅度。 */
 	set noiseStrength( value: number ) {
 
 		this._noiseStrength.value = value
 
 	}
 
+	/** 噪声频率。越小团块越大。 */
 	set noiseScale( value: number ) {
 
 		this._noiseScale.value = value
 
 	}
 
+	/** 噪声沿世界 X、Z 的流动速度。 */
 	set noiseSpeed( value: Vector2 ) {
 
 		this._noiseSpeed.value.copy( value )
 
 	}
 
+	/** 定向光传播方向。写入时会单位化。 */
 	set inscatteringLightDirection( value: Vector3 ) {
 
 		this._inscatteringLightDirection.value.copy( value ).normalize()
 
 	}
 
+	/** 定向散射颜色。 */
 	set directionalInscatteringColor( value: ColorRepresentation ) {
 
 		this._directionalInscatteringColor.value.set( value )
 
 	}
 
+	/** 定向散射聚焦指数。越大，光晕越窄。 */
 	set directionalInscatteringExponent( value: number ) {
 
 		this._directionalInscatteringExponent.value = value
 
 	}
 
+	/** 定向散射开始计算的距离。 */
 	set directionalInscatteringStartDistance( value: number ) {
 
 		this._directionalInscatteringStartDistance.value = value
 
 	}
 
-	// 是否启用效果。关掉时按 0 混合，输出场景原色。用 float 而不是 select：select 在条件为假时会丢掉颜色采样，画面变黑
+	/** 是否混雾。用 float 而不是 select：select 在关掉时会丢掉颜色采样，画面变黑。 */
 	private readonly _enabled = uniform( true )
 
-	// 雾色。Color.set 会把 sRGB 转成线性工作空间，和场景颜色处在同一空间
+	/** 雾色。和场景颜色同一套线性工作空间。 */
 	private readonly _fogColor = uniform( new Color() )
 
-	// 雾的最大不透明度。透射率不会低于 1 - fogMaxOpacity
+	/** 雾的最大不透明度。透射率不会低于 `1 - 这个值`。 */
 	private readonly _fogMaxOpacity = uniform( 1.0 )
 
-	// 雾面高度处的密度
+	/** 雾面高度处的密度。 */
 	private readonly _fogDensity = uniform( 0.02 )
 
-	// 雾面高度（世界坐标 Y）
+	/** 雾面高度，世界坐标 Y。 */
 	private readonly _fogHeight = uniform( 10.0 )
 
-	// 高度衰减系数。每升高 1 / value 个单位，密度减半。0 是均匀雾
+	/** 高度衰减。每升高 `1 / value` 个单位，密度减半。`0` 是均匀雾。 */
 	private readonly _fogHeightFalloff = uniform( 0.25 )
 
-	// 雾效开始计算的距离。这段距离不进积分
+	/** 相机前这段距离不进积分。 */
 	private readonly _fogStartDistance = uniform( 0.0 )
 
-	// 噪声对雾面高度的最大扰动幅度
+	/** 噪声对雾面高度的最大扰动幅度。 */
 	private readonly _noiseStrength = uniform( 0.1 )
 
-	// 噪声频率。越小团块越大
+	/** 噪声频率。越小团块越大。 */
 	private readonly _noiseScale = uniform( 0.01 )
 
-	// 噪声沿世界 X、Z 轴的流动速度
+	/** 噪声沿世界 X、Z 的流动速度。 */
 	private readonly _noiseSpeed = uniform( new Vector2() )
 
-	// 定向光传播方向（单位向量）。光从正上方射下时为 (0, -1, 0)，朝上看散射最强
+	/** 定向光传播方向。光从正上方射下时为 `(0, -1, 0)`，朝上看散射最强。 */
 	private readonly _inscatteringLightDirection = uniform( new Vector3() )
 
-	// 定向散射颜色。演示里会先乘上强度，抵消 ACES 对光晕的压缩
+	/** 定向散射颜色。外面会先乘上强度，再写进来。 */
 	private readonly _directionalInscatteringColor = uniform( new Color() )
 
-	// 定向散射聚焦指数。越大，光晕越窄
+	/** 定向散射聚焦指数。越大，光晕越窄。 */
 	private readonly _directionalInscatteringExponent = uniform( 8.0 )
 
-	// 定向散射开始计算的距离
+	/** 定向散射开始计算的距离。 */
 	private readonly _directionalInscatteringStartDistance = uniform( 0.0 )
 
-	// 场景相机的世界矩阵。setCamera 换成相机自己的 matrixWorld，渲染时读到的就是最新值
+	/** 场景相机的世界矩阵。按引用绑到相机自己的 `matrixWorld`。 */
 	private readonly _cameraWorldMatrix = uniform( new Matrix4() )
 
-	// 场景相机的投影逆矩阵。同样按引用绑定
+	/** 场景相机的投影逆矩阵。同样按引用绑定。 */
 	private readonly _cameraProjectionMatrixInverse = uniform( new Matrix4() )
 
-	// 近、远裁剪面。只在开启对数深度缓冲时，用来把深度换回透视深度
+	/** 近裁。只在开启对数深度缓冲时，用来把深度换回透视深度。 */
 	private readonly _cameraNear = uniform( 0.1 )
+
+	/** 远裁。天空噪声判断远平面时也读它。 */
 	private readonly _cameraFar = uniform( 1000.0 )
 
-	constructor( colorNode: Node, depthNode: Node, params: SSFParams = {} ) {
+	/** 已经叠过泛光的颜色。 */
+	private readonly color: Node
 
-		this.material.name = 'SSF'
-		this.outputNode = this._initialize( colorNode, depthNode, params )
-		this.material.fragmentNode = this.outputNode
+	/** 场景深度。 */
+	private readonly depth: Node
+
+	/** 场景相机。还原世界坐标、读近远裁。 */
+	private readonly camera: Camera
+
+	/**
+	 * @param options 颜色、深度、场景相机和雾参数
+	 */
+	constructor( options: SSFOptions ) {
+
+		super( 'vec4' )
+
+		this.updateBeforeType = NodeUpdateType.FRAME
+		this.color = options.color
+		this.depth = options.depth
+		this.camera = options.camera
+		this._applyParams( options )
 
 	}
 
 	/**
-	 * 绑定场景相机。
-	 *
-	 * 全屏四边形用的是正交相机，TSL 内置的 cameraWorldMatrix、cameraPosition 指向那台相机。
-	 * 这里必须用自己的 uniform 绑定场景相机。按引用赋值后，相机更新矩阵时 uniform 自动跟随，不用每帧拷贝。
+	 * 混过雾的颜色。接在泛光后面、炫光前面。
 	 */
-	setCamera( camera: Camera ): void {
+	setup(): Node {
 
+		return this._createOutputNode( this.color, this.depth )
+
+	}
+
+	/**
+	 * 把场景相机的矩阵和近远裁写到 uniform。
+	 * 投影用构造时传入的相机，不用 `frame.camera`（那是全屏四边形的正交相机）。
+	 * 矩阵按引用绑，不用每帧拷贝；近远裁是数字，切轨道 / 第一人称时这里会跟上。
+	 *
+	 * @param _frame 当前节点帧
+	 */
+	updateBefore( _frame: NodeFrame ): boolean | undefined {
+
+		const camera = this.camera
 		this._cameraWorldMatrix.value = camera.matrixWorld
 		this._cameraProjectionMatrixInverse.value = camera.projectionMatrixInverse
 
@@ -224,9 +320,16 @@ export class SSF {
 		this._cameraNear.value = near
 		this._cameraFar.value = far
 
+		return
+
 	}
 
-	private _initialize( colorNode: Node, depthNode: Node, params: SSFParams ): Node {
+	/**
+	 * 把构造参数写进 uniform。之后只改 setter，不重建节点。
+	 *
+	 * @param params 雾的可调项
+	 */
+	private _applyParams( params: SSFParams ): void {
 
 		const {
 
@@ -261,9 +364,6 @@ export class SSF {
 		this.directionalInscatteringColor = directionalInscatteringColor
 		this.directionalInscatteringExponent = directionalInscatteringExponent
 		this.directionalInscatteringStartDistance = directionalInscatteringStartDistance
-
-		// 节点图只建一次。之后改的是 uniform，不重建材质
-		return this._createOutputNode( colorNode, depthNode )
 
 	}
 
@@ -311,6 +411,12 @@ export class SSF {
 
 	}
 
+	/**
+	 * 从深度还原世界坐标，沿视线积雾，把雾色和定向散射混回颜色。
+	 *
+	 * @param colorNode 已经叠过泛光的场景颜色
+	 * @param depthNode 场景通道的深度
+	 */
 	private _createOutputNode( colorNode: Node, depthNode: Node ): Node {
 
 		const {

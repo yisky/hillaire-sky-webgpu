@@ -1,8 +1,10 @@
 /**
  * 每个天空一份的 SkyPro 积云。
  *
- * 预设是 SkyPro 的 “Partly cloudy”。
- * 半分辨率历史，每帧只追踪 4×4 里的一个槽。形状噪声来自 `public/clouds`。
+ * 预设是 SkyPro 的 “Partly cloudy”：云底 4000 米，厚 5200 米。
+ * 半分辨率历史，每帧只追踪 4×4 格子里的一个槽，十六帧铺满一圈。
+ * 形状噪声来自 `public/clouds`。天气图和边界格只写一次。
+ * 合成读 {@link SkyProField.viewClouds}，`a` 是不透明度；{@link sampleSkyPro} 把它改成透射。
  * 全景和地面云影不在这里。
  */
 
@@ -52,19 +54,28 @@ import {
 
 import { skyproBounds, skyproResolve, skyproTrace, skyproWeather } from './skypro-wgsl';
 
+/** 世界 XZ 上的风向。速度由天空的 `windSpeed` 给。 */
 const WIND = new Vector2( 0.35, 0.94 ).normalize();
+
+/** 重投影时历史占的比例。本帧槽是新样本时再按运动和演化打折。 */
 const HISTORY_WEIGHT = 0.9;
 
-/** 采样历史缓冲时用的相机。方向是世界空间单位向量。 */
+/**
+ * 采样历史缓冲时用的相机。方向是世界空间单位向量。
+ *
+ * 合成和炫光都读这份，必须是写这张缓冲时的姿态，不能换成当前 `frame.camera`。
+ */
 export type SkyProView = {
 	right: Node< 'vec3' >;
 	up: Node< 'vec3' >;
 	fwd: Node< 'vec3' >;
 	/** `x` 是水平切向，`y` 是垂直切向。 */
 	tan: Node< 'vec2' >;
+	/** 还没追过第一帧时是 `0`，视线当晴空。 */
 	valid: Node< 'float' >;
 };
 
+/** 上一帧和这一帧的透视姿态。重投影、丢历史都靠它。 */
 type Pose = {
 	position: Vector3;
 	right: Vector3;
@@ -76,6 +87,9 @@ type Pose = {
 
 /**
  * 把观察方向投回云缓冲。缓冲里 `a` 是不透明度，返回值的 `a` 是透射。
+ *
+ * 视线落到视锥外、还没写过、或几乎朝后，返回 `(0, 0, 0, 1)`：没有内散射，天空全透过。
+ * 地平线以下用 `direction.y` 从 `-0.05` 到 `-0.03` 收掉，地面不会蒙一层云。
  *
  * @param view 半分辨率历史，`vec4(内散射, 不透明度)`
  * @param camera 写这张缓冲时的相机
@@ -102,6 +116,7 @@ export function sampleSkyPro( view: StorageTexture, camera: SkyProView, directio
 
 }
 
+/** 半浮点 RGBA 存储纹理。历史、格子样本、暂存都用这个。 */
 function makeHalf( width: number, height: number, name: string ): StorageTexture {
 
 	const texture = new StorageTexture( width, height );
@@ -121,6 +136,7 @@ function makeHalf( width: number, height: number, name: string ): StorageTexture
 
 }
 
+/** 八位 RGBA 存储纹理。天气图可重复，边界格夹边。 */
 function makeByte( width: number, height: number, name: string, repeat: boolean ): StorageTexture {
 
 	const texture = new StorageTexture( width, height );
@@ -140,7 +156,11 @@ function makeByte( width: number, height: number, name: string, repeat: boolean 
 
 }
 
-/** 把 64³ 体数据按 8×8 个切片铺成一张二维图。WebGPU 不能给三维纹理加渲染用途。 */
+/**
+ * 把 64³ 体数据按 8×8 个切片铺成一张二维图。WebGPU 不能给三维纹理加渲染用途。
+ *
+ * 切片从左到右、从上到下。着色器里用 `textureLoad` 再做三线性。
+ */
 function packNoiseAtlas( volume: Uint8Array, width: number, height: number, depth: number ): Uint8Array {
 
 	const tiles = 8;
@@ -177,40 +197,52 @@ function packNoiseAtlas( volume: Uint8Array, width: number, height: number, dept
 /**
  * 一个天空实例的积云场。
  *
- * 天气图和历史属于这一份。形状噪声和蓝噪声在第一次 `update` 时从文件读入。
+ * 天气图和历史属于这一份。形状噪声和蓝噪声在第一次 `update` 之前从文件读入。
+ * 外面赋到天空的 `clouds` 之后，`Sky.update` 会推进它，合成改读带云的颜色。
  */
 export class SkyProField {
 
-	/** 屏幕采样的历史。`a` 是不透明度。 */
+	/** 半分辨率历史。`vec4(内散射, 不透明度)`。合成和炫光都读它。 */
 	readonly viewClouds: StorageTexture;
 
-	/** 和 {@link SkyProField.viewClouds} 一起交给合成。 */
+	/** 写 {@link SkyProField.viewClouds} 时的相机。采样必须用这份，不能换成当前帧相机。 */
 	readonly viewCamera: SkyProView;
 
+	/** 1024² 天气覆盖。只写一次，之后追踪采样。 */
 	private readonly weather = makeByte( 1024, 1024, 'skyproWeather', true );
 
+	/** 64² 边界格，每格是天气最大值，空域跳步用。 */
 	private readonly bounds = makeByte( 64, 64, 'skyproBounds', false );
 
+	/** 本帧追踪的格子。边长是历史的四分之一，只填 4×4 里的一个槽。 */
 	private readonly source = makeHalf( 4, 4, 'skyproSource' );
 
+	/** 格子深度（千米）和占位。 */
 	private readonly sourceMeta = makeHalf( 4, 4, 'skyproSourceMeta' );
 
+	/** 合成写这里，再拷进历史。同一张存储纹理不能边读边写。 */
 	private readonly scratch = makeHalf( 4, 4, 'skyproScratch' );
 
 	private readonly scratchMeta = makeHalf( 4, 4, 'skyproScratchMeta' );
 
+	/** 历史深度。`x` 是当前，`y` 是重投影用的。 */
 	private readonly historyMeta: StorageTexture;
 
+	/** 64³ 形状噪声铺成的 512² 图集。 */
 	private noise: DataTexture | null = null;
 
+	/** 64² 蓝噪声，追踪抖步长。 */
 	private blue: DataTexture | null = null;
 
 	private noiseReady = false;
 
+	/** compute 核已经建过。噪声读完才建。 */
 	private built = false;
 
+	/** 天气图和边界格已经写过。覆盖变了也不重写，核里每帧读 `coverage`。 */
 	private weatherDone = false;
 
+	/** 历史能拿来重投影。改分辨率、云量、大动相机或太阳都会丢掉。 */
 	private historyValid = false;
 
 	private frameIndex = 0;
@@ -219,6 +251,7 @@ export class SkyProField {
 
 	private windZ = 0;
 
+	/** 形状沿风向滑过的累计距离。 */
 	private evolution = 0;
 
 	private readonly drawing = new Vector2();
@@ -235,6 +268,7 @@ export class SkyProField {
 
 	private historyHeight = 4;
 
+	/** 本帧 4×4 格子里要新追的槽。 */
 	private readonly slotNode = uniform( new Vector2() );
 
 	private readonly historySizeNode = uniform( new Vector2( 4, 4 ) );
@@ -279,12 +313,15 @@ export class SkyProField {
 
 	private readonly nightNode = uniform( 0 );
 
+	/** 天空辐照 `E/π`，夜里给云底补光。 */
 	private readonly skyIrrNode = uniform( new Vector3( 0.3, 0.4, 0.6 ) );
 
 	private readonly viewHeightNode = uniform( 6360 );
 
+	/** 全分辨率一个像素对应的圆锥角。 */
 	private readonly pixelConeNode = uniform( 0.001 );
 
+	/** 历史一个像素对应的圆锥角，行进步长按这个放。 */
 	private readonly stepConeNode = uniform( 0.001 );
 
 	private readonly frameNode = uniform( 0 );
@@ -320,8 +357,8 @@ export class SkyProField {
 	private disposed = false;
 
 	/**
-	 * @param sky 天空视图表
-	 * @param transmittance 透射表
+	 * @param sky 天空视图表。行进到天边时混进这张表的颜色
+	 * @param transmittance 透射表。云里的太阳光走它
 	 */
 	constructor( sky: StorageTexture, transmittance: StorageTexture ) {
 
@@ -343,10 +380,13 @@ export class SkyProField {
 	/**
 	 * 推进一帧。噪声还没读完时什么都不画。
 	 *
+	 * 顺序：必要时重设尺寸 → 写相机和风 → 第一次写天气和边界 → 追一个槽 → 叠进历史 → 拷回。
+	 * 相机挪过一千米、朝向差太多、视场变了、太阳转了或云量变了，历史作废，下一帧当第一帧。
+	 *
 	 * @param renderer 派发 compute 的渲染器
 	 * @param coverage 云量，`0..1`。预设是 `0.49`
-	 * @param camera 当前相机
-	 * @param delta 距上一帧的秒数
+	 * @param camera 当前相机。透视相机，用 `fov` 和 `aspect`
+	 * @param delta 距上一帧的秒数，上限 `0.1`
 	 * @param sun 世界空间太阳方向
 	 * @param night 夜深，`0..1`
 	 * @param skyIrradiance 天空辐照 `E/π`
@@ -379,6 +419,7 @@ export class SkyProField {
 
 			this.viewWidth = viewW;
 			this.viewHeight = viewH;
+			// 格子是画面的 1/8，历史是格子的 4 倍，也就是半分辨率。
 			this.sourceWidth = Math.max( 1, Math.ceil( viewW / 8 ) );
 			this.sourceHeight = Math.max( 1, Math.ceil( viewH / 8 ) );
 			this.historyWidth = this.sourceWidth * 4;
@@ -515,6 +556,11 @@ export class SkyProField {
 
 	}
 
+	/**
+	 * 4×4 希尔伯特槽。十六帧走完一圈，相邻帧不会挤在同一块。
+	 *
+	 * @param index `0..15`
+	 */
 	private lattice( index: number ): [ number, number ] {
 
 		let x = 0;
@@ -533,6 +579,10 @@ export class SkyProField {
 
 	}
 
+	/**
+	 * 读形状体和蓝噪声。gzip 头十六字节后面是 64³ RGBA。
+	 * 卸载发生在读完之前就把贴图丢掉，避免挂到已释放的场上。
+	 */
 	private async loadNoise(): Promise< void > {
 
 		try {
@@ -592,6 +642,11 @@ export class SkyProField {
 
 	}
 
+	/**
+	 * 五个 compute 核。天气和边界只派一次，追踪、合成、拷贝每帧都派。
+	 *
+	 * 核绑的是这一份的纹理节点，分辨率变了不用重建，只改 `dispatchSize`。
+	 */
 	private build(): void {
 
 		const noise = this.noise;

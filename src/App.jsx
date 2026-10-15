@@ -14,8 +14,8 @@ import { Glare } from './glare'
 import { AutoExposure } from './exposure'
 import { createForest } from './trees'
 import { SceneBloom } from './bloom/Bloom'
-import { grade, gradeParams, updateGrade } from './grade/grade'
-import { display, exposure as displayExposure, updateDisplay } from './grade/display'
+import { Grade } from './grade/Grade'
+import { Display } from './grade/Display'
 import { SSF } from './ssf/SSF'
 import { SkyProbe } from './env/SkyProbe'
 import { createFps } from './ui/fps'
@@ -27,6 +27,9 @@ import { createSettings } from './ui/settings'
  * 轨道相机默认在西南看向原点（主楼视觉中心，不是场地组的位移）。
  * 第一人称按 1.8 米视高，场地整体缩放 0.08，所以眼睛高度是 `1.8 * 0.08`。
  * `?demo=1` 跑 120 秒时间轴，结束后把控制交回轨道。
+ *
+ * 后期不走渲染器自带的色调映射。输出节点是 Display：ACES、sRGB、抖动。
+ * 炫光可见度和自动曝光适应在 `pipeline.render()` 之后 compute，晚一帧生效。
  */
 const ORBIT_HOME = { position: [ - 5, 1.2, 5 ], target: [ 0, 1, 0 ], fov: 45 }
 /** 第一人称眼睛离地高度。1.8 米乘场地缩放。 */
@@ -50,7 +53,8 @@ const Q = - 0.75
 /** `Q` 再加一圈。时间轴里用它避免方位从 2π 跳回 0 时倒转。 */
 const Q2 = Q + Math.PI * 2
 /**
- * 演示关键帧。`t` 秒，`hour` 太阳时刻；相邻帧方位、高度、半径、目标用 smoothstep，云量用线性 `u`。
+ * 演示关键帧。当前全是轨道机位。
+ * `t` 秒，`hour` 太阳时刻；相邻帧方位、高度、半径、目标用 smoothstep，云量用线性 `u`。
  * `up` 抬头看云。日落钉在 17.8、日出钉在 6.2（太阳贴地平线，18.3 已经沉下去）。
  */
 const DEMO_KEYS = [
@@ -121,12 +125,12 @@ function applySun( sky, hours, azimuth ) {
 
 /** 正午雾密度。贴地平线更浓。 */
 const FOG_DENSITY_NOON = 0.005
+/** 日出前后的雾密度。 */
 const FOG_DENSITY_HORIZON = 0.012
-/** 辐射雾散掉的起点和散尽时刻。 */
+/** 辐射雾开始散掉的时刻。 */
 const FOG_DAWN = 5.8
+/** 辐射雾散尽、回到正午密度的时刻。 */
 const FOG_CLEAR = 10
-/** 日落时刻。密度曲线目前没用到。 */
-const FOG_DUSK = 18.2
 /** 后半夜开始积雾。 */
 const FOG_GATHER = 3.5
 /** 雾体参考色。`matchFogLuma` 只改色相，亮度钉在这层。 */
@@ -155,6 +159,7 @@ function radiationFogDensity( hours ) {
 
 }
 
+/** Rec.709 亮度。给雾色钉亮度用，不进着色器。 */
 function colorLuma( color ) {
 
 	return 0.2126 * color.r + 0.7152 * color.g + 0.0722 * color.b
@@ -221,7 +226,6 @@ export default function App() {
 		const clouds = new SkyProField( sky.skyView, sky.transmittance )
 		sky.clouds = clouds
 		sky.coverage = settings.coverage
-		placeMoon( sky )
 		scene.add( sky )
 
 		const sunLight = new SunLight( 0xffffff, 1 )
@@ -246,7 +250,6 @@ export default function App() {
 			light.shadow.camera.bottom = -25
 			light.shadow.bias = -0.0005
 			light.shadow.normalBias = 0.05
-			//light.shadow.intensity = 0.95
 
 		}
 		scene.add( sunLight, moonLight, ambient )
@@ -289,7 +292,10 @@ export default function App() {
 
 		}
 		const standY = ( x, z ) => groundY( x, z ) + EYE
-		/** 在轨道和第一人称之间切。第一人称点画布锁定指针，Esc 解锁。V 键走设置。 */
+		/**
+		 * 在轨道和第一人称之间切。第一人称点画布锁定指针，Esc 解锁。V 键走设置。
+		 * 切到轨道时用当前朝向重算 target，距离钉在 `minDistance`。切到第一人称时抹掉 roll，y 落到地面加视高。
+		 */
 		const applyCam = ( mode ) => {
 
 			if ( mode !== 'first' && mode !== 'orbit' ) return
@@ -324,7 +330,11 @@ export default function App() {
 		let demoPanel = false
 		const demoTarget = new THREE.Vector3( ...ORBIT_HOME.target )
 		const demoFocus = new THREE.Vector3()
-		/** 按 DEMO_KEYS 插值时刻、云量、相机。演示未结束时关掉手动轨道。 */
+		/**
+		 * 按 DEMO_KEYS 插值时刻、云量、轨道相机。
+		 * 方位切到另一段时用前一帧的 `az` 钉住，避免 2π 跳变倒转。
+		 * 演示未结束时关掉手动轨道。
+		 */
 		const runDemo = ( elapsed ) => {
 
 			const last = DEMO_KEYS[ DEMO_KEYS.length - 1 ]
@@ -354,47 +364,34 @@ export default function App() {
 
 			settings.setCamera( a.mode )
 			applyCam( a.mode )
-			if ( a.mode === 'orbit' ) {
+			const hold = b.mode !== 'orbit'
+			const az = a.az + ( ( hold ? a.az : b.az ) - a.az ) * s
+			const el = a.el + ( ( hold ? a.el : b.el ) - a.el ) * s
+			const radius = a.r + ( ( hold ? a.r : b.r ) - a.r ) * s
+			const upK = ( a.up || 0 ) + ( ( ( hold ? a.up : b.up ) || 0 ) - ( a.up || 0 ) ) * s
+			const tx = ( a.tx ?? 0 ) + ( ( hold ? a.tx ?? 0 : b.tx ?? 0 ) - ( a.tx ?? 0 ) ) * s
+			const ty = ( a.ty ?? 1 ) + ( ( hold ? a.ty ?? 1 : b.ty ?? 1 ) - ( a.ty ?? 1 ) ) * s
+			const tz = ( a.tz ?? 0 ) + ( ( hold ? a.tz ?? 0 : b.tz ?? 0 ) - ( a.tz ?? 0 ) ) * s
+			const ce = Math.cos( el )
+			demoTarget.set( tx, ty, tz )
+			camera.position.set(
+				demoTarget.x + radius * Math.sin( az ) * ce,
+				Math.max( 0.2, demoTarget.y + radius * Math.sin( el ) ),
+				demoTarget.z + radius * Math.cos( az ) * ce,
+			)
+			demoFocus.copy( demoTarget )
+			if ( upK > 0 ) {
 
-				const hold = b.mode !== 'orbit'
-				const az = a.az + ( ( hold ? a.az : b.az ) - a.az ) * s
-				const el = a.el + ( ( hold ? a.el : b.el ) - a.el ) * s
-				const radius = a.r + ( ( hold ? a.r : b.r ) - a.r ) * s
-				const upK = ( a.up || 0 ) + ( ( ( hold ? a.up : b.up ) || 0 ) - ( a.up || 0 ) ) * s
-				const tx = ( a.tx ?? 0 ) + ( ( hold ? a.tx ?? 0 : b.tx ?? 0 ) - ( a.tx ?? 0 ) ) * s
-				const ty = ( a.ty ?? 1 ) + ( ( hold ? a.ty ?? 1 : b.ty ?? 1 ) - ( a.ty ?? 1 ) ) * s
-				const tz = ( a.tz ?? 0 ) + ( ( hold ? a.tz ?? 0 : b.tz ?? 0 ) - ( a.tz ?? 0 ) ) * s
-				const ce = Math.cos( el )
-				demoTarget.set( tx, ty, tz )
-				camera.position.set(
-					demoTarget.x + radius * Math.sin( az ) * ce,
-					Math.max( 0.2, demoTarget.y + radius * Math.sin( el ) ),
-					demoTarget.z + radius * Math.cos( az ) * ce,
-				)
-				demoFocus.copy( demoTarget )
-				if ( upK > 0 ) {
-
-					lookDir.copy( demoTarget ).sub( camera.position )
-					lookDir.y += upK * lookDir.length() * 2.2
-					demoFocus.copy( camera.position ).add( lookDir )
-
-				}
-
-				camera.lookAt( demoFocus )
-
-			} else {
-
-				const hold = b.mode !== 'first'
-				const x = a.x + ( ( hold ? a.x : b.x ) - a.x ) * s
-				const z = a.z + ( ( hold ? a.z : b.z ) - a.z ) * s
-				const yaw = a.yaw + ( ( hold ? a.yaw : b.yaw ) - a.yaw ) * s
-				camera.position.set( x, standY( x, z ), z )
-				euler.set( 0, yaw, 0, 'YXZ' )
-				camera.quaternion.setFromEuler( euler )
+				lookDir.copy( demoTarget ).sub( camera.position )
+				lookDir.y += upK * lookDir.length() * 2.2
+				demoFocus.copy( camera.position ).add( lookDir )
 
 			}
 
+			camera.lookAt( demoFocus )
+
 		}
+		/** 第一人称点画布才锁指针。演示没跑完不锁。 */
 		const onCanvasClick = () => {
 
 			if ( DEMO && ! demoDone ) return
@@ -431,6 +428,10 @@ export default function App() {
 		let forest = null
 		let bloom = null
 		let fog = null
+		let glare = null
+		let exposure = null
+		let grade = null
+		let display = null
 		let environment = null
 		let fps = null
 		const lightDirection = new THREE.Vector3()
@@ -449,7 +450,10 @@ export default function App() {
 			if ( loadsLeft === 0 ) contentReady = true
 
 		}
-		/** 上一帧画阴影时的光方向和相机。超阈值才 `needsUpdate`。 */
+		/**
+		 * 上一帧画阴影时的光方向和相机。太阳月亮各记一份。
+		 * 切回来不必立刻重画；方向、相机位移或转向超出阈值才 `needsUpdate`。
+		 */
 		const shadowSlot = () => ( {
 			dir: new THREE.Vector3(),
 			pos: new THREE.Vector3(),
@@ -494,6 +498,7 @@ export default function App() {
 
 				gltf.scene.position.y = height
 				// 地形、地面、道路可踩。楼和树不打 walk，第一人称不会站上去。
+				// 先开投射和接收，加进场地算出世界包围球后再把远处的关掉，阴影贴图留给近处。
 				const walk = /terrain|landscape|roads/.test( url )
 				gltf.scene.traverse( ( obj ) => {
 
@@ -581,6 +586,10 @@ export default function App() {
 
 		}
 
+		/**
+		 * 等 WebGPU 就绪后建后期链和循环。
+		 * 模型加载和这一步并行：场地可以先往 scene 里加，通道在 init 之后才画。
+		 */
 		async function start() {
 
 			if ( ! navigator.gpu ) {
@@ -607,7 +616,7 @@ export default function App() {
 			}
 
 			renderer.setPixelRatio( 1 )
-			// 色调映射、sRGB、抖动在 display 里做。渲染器保持线性，后期链最后一步再转显示。
+			// 色调映射、sRGB、抖动在显示变换里做。渲染器保持线性，后期链最后一步再转显示。
 			renderer.toneMapping = THREE.NoToneMapping
 			const resize = () => {
 
@@ -623,9 +632,11 @@ export default function App() {
 			window.addEventListener( 'resize', onResize )
 
 			// 只写深度，不跑光照，阴影就不会在这一遍里再画一次。法线由 GTAO 从深度图重建。
+			// 预通道必须单采样：GTAO 的 textureGather 吃不了 MSAA 深度。场景通道继续跟渲染器走 4x MSAA。
+			// 镂空用物体自己的 map.a 和 alphaTest；没有贴图时采样 1×1 白图，不会误裁。
 			depthWhite = new THREE.DataTexture( new Uint8Array( [ 255, 255, 255, 255 ] ), 1, 1 )
 			depthWhite.needsUpdate = true
-			const depthMap = uniform( depthWhite ).onObjectUpdate( ( { object }, self ) => {
+			const depthMap = texture( depthWhite ).onObjectUpdate( ( { object }, self ) => {
 
 				const material = object.material
 				self.value = material && ! Array.isArray( material ) && material.map ? material.map : depthWhite
@@ -642,52 +653,61 @@ export default function App() {
 			depthMaterial.toneMapped = false
 			depthMaterial.colorNode = Fn( () => {
 
-				texture( depthMap ).a.lessThan( depthAlphaTest ).discard()
+				depthMap.a.lessThan( depthAlphaTest ).discard()
 				return vec4( 0, 0, 0, 1 )
 
 			} )()
-			prePass = pass( scene, camera )
+			prePass = pass( scene, camera, { samples: 1 } )
 			prePass.overrideMaterial = depthMaterial
 			aoPass = ao( prePass.getTextureNode( 'depth' ), null, camera )
 			aoPass.resolutionScale = 0.5
 			aoPass.useTemporalFiltering = false
 			const aoAmount = uniform( 1 )
 
-			// 后期：深度预通道 → 半分辨率 GTAO（不走时间滤波）→ 场景把 AO 混进内置环境光遮蔽。
-			// 泛光采场景色；雾吃「场景 + 泛光」；炫光、自动曝光、调色、显示变换接在后面。
+			// 后期链全是 TempNode，图里直接串起来。输出节点就是显示变换。
+			// 深度预通道（单采样）→ 半分辨率 GTAO → 场景（MSAA，把 AO 混进内置环境光遮蔽）
+			// → 泛光 → 雾（场景色 + 泛光）→ 炫光 → 自动曝光 → 调色 → 显示变换（ACES、sRGB、抖动）。
+			// 雾色、密度、不透明度每帧按太阳写，构造时不必再给一遍。
 			scenePass = pass( scene, camera )
 			scenePass.contextNode = builtinAOContext( mix( float( 1 ), aoPass.getTextureNode().sample( screenUV ).r, aoAmount ) )
 			const color = scenePass.getTextureNode( 'output' )
 			const depth = scenePass.getTextureNode( 'depth' )
-			// 太阳方向、颜色、亮度是 Glare 自己的 uniform，每帧在循环里抄天空的值。
-			const glare = new Glare( {
-				depth: scenePass.getTexture( 'depth' ),
-				clouds,
-			} )
 			bloom = new SceneBloom( color )
-			fog = new SSF( color.add( bloom ), depth, {
-				fogColor: '#d0dce8',
-				fogMaxOpacity: 0.35,
-				fogDensity: 0.005,
+			fog = new SSF( {
+				color: color.add( bloom ),
+				depth,
+				camera,
 				fogHeight: 0.5,
 				fogHeightFalloff: 0.05,
 				fogStartDistance: 5,
 				noiseStrength: 0.0015,
 			} )
-			fog.setCamera( camera )
-			// 计量读泛光缩到 1/16 的那一级。太阳方向同样每帧抄到 exposure.sunDirection。
-			const exposure = new AutoExposure( {
+			glare = new Glare( {
+				depth: scenePass.getTexture( 'depth' ),
+				clouds,
+				input: fog,
+				camera,
+			} )
+			exposure = new AutoExposure( {
 				color: bloom.meter,
+				input: glare,
 			} )
 			pipeline = new THREE.RenderPipeline( renderer )
-			// 关掉管线自带的输出变换，避免和 display 里的 ACES、sRGB、抖动叠两层。
+			// 关掉管线自带的输出变换，避免和 Display 里的 ACES、sRGB 叠两层。
 			pipeline.outputColorTransform = false
-			pipeline.outputNode = display( grade( exposure.apply( glare.composite( fog.outputNode ) ) ) )
+			grade = new Grade( { input: exposure } )
+			display = new Display( { input: grade } )
+			pipeline.outputNode = display
 			// 环境贴图只烤大气，不要视锥云和太阳盘。太阳方向转过约 0.004 弧度才重烤。
 			environment = new SkyProbe( renderer, scene, sky )
 			fps = createFps()
 
-			// 一帧顺序：相机 → 太阳月亮 → 阴影脏区 → 雾 → 抄炫光/曝光 uniform → 画后期 → 量可见度和适应。
+			/**
+			 * 一帧顺序：
+			 * 相机 / 演示时间轴 → 太阳月亮 → 阴影脏区 → 雾色密度 → 抄炫光和曝光的太阳 uniform
+			 * → pipeline.render（各节点 updateBefore：泛光金字塔、雾绑相机、炫光写屏幕位置、调色和显示写帧序号）
+			 * → compute 可见度和曝光适应（读的是这一帧刚画完的深度 / 计量图，下一帧才生效）。
+			 */
 			renderer.setAnimationLoop( ( time ) => {
 
 				timer.update( time )
@@ -730,15 +750,15 @@ export default function App() {
 				if ( sun.advance && ( ! DEMO || demoDone ) ) sun.setTime( ( sun.time + delta * sun.speed + 24 ) % 24 )
 				applySun( sky, sun.time, sun.azimuth )
 				sky.coverage = settings.coverage
-				// EV 滑条写成 display 的曝光：基准 0.55 乘 2^ev。调色本身不再做 ACES。
-				displayExposure.value = 0.55 * 2 ** settings.ev
+				// EV 滑条写成显示变换的曝光：基准 0.55 乘 2^ev。调色还在线性 HDR 里，ACES 在 Display。
+				display.exposure.value = 0.55 * 2 ** settings.ev
 				aoAmount.value = settings.ao
 				bloom.bloom.value = settings.bloom
 				glare.strength.value = settings.glare
-				gradeParams.saturation.value = settings.saturation
-				gradeParams.contrast.value = settings.contrast
-				gradeParams.vignette.value = settings.vignette
-				gradeParams.grain.value = settings.grain
+				grade.saturation.value = settings.saturation
+				grade.contrast.value = settings.contrast
+				grade.vignette.value = settings.vignette
+				grade.grain.value = settings.grain
 				placeMoon( sky )
 				sky.update( renderer, delta, camera )
 				environment.update( sky.sunDirection )
@@ -785,15 +805,12 @@ export default function App() {
 				else fogInscatter.copy( sky.moonColor ).multiplyScalar( FOG_INSCATTER * night )
 				fog.directionalInscatteringColor = fogInscatter
 				fog.inscatteringLightDirection = lightDirection.copy( sunLit ? sky.sunDirection : sky.moonDirection ).negate()
-				// 炫光和自动曝光不握天空的 Node，每帧把太阳抄进它们自己的 uniform。
+				// 炫光要太阳方向、颜色、亮度；自动曝光只要方向（夜里收倍数上限）。都不握天空节点，每帧抄。
+				// 屏幕位置、圆盘半径、雾的相机矩阵在各自 updateBefore 里写，这里不必再调。
 				glare.sunDirection.value.copy( sky.sunDirection )
 				glare.sunColor.value.copy( sky.sunColor )
 				glare.sunIntensity.value = sky.sunIntensity
-				glare.update( renderer, camera, delta )
 				exposure.sunDirection.value.copy( sky.sunDirection )
-				exposure.update( delta )
-				updateGrade()
-				updateDisplay()
 				pipeline.render()
 				// 可见度和曝光适应读的是这一帧刚画完的深度/计量图，下一帧才生效。
 				renderer.compute( glare.visibility )
@@ -809,6 +826,7 @@ export default function App() {
 		return () => {
 
 			// 异步加载回来先看 stopped，避免卸载后再往场景里塞东西。
+			// 后期节点后建的先拆：显示 → 调色 → 曝光 → 炫光 → 雾 → 泛光，再拆通道和渲染器。
 			stopped = true
 			settings.dispose()
 			canvas.removeEventListener( 'click', onCanvasClick )
@@ -822,7 +840,11 @@ export default function App() {
 			clouds.dispose( renderer )
 			disposeObject( site )
 			forest?.dispose()
-			fog?.material.dispose()
+			display?.dispose()
+			grade?.dispose()
+			exposure?.dispose()
+			glare?.dispose()
+			fog?.dispose()
 			environment?.dispose()
 			fps?.dispose()
 			bloom?.dispose()
