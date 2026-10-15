@@ -144,7 +144,11 @@ function place( pixels: Uint8ClampedArray, width: number, height: number ): Tree
 
 }
 
-function cutout( material: Material ) {
+/**
+ * 把 Alpha Blend 的叶子改成镂空。关掉透明、写深度，阈值 `0.1`。
+ * 卡片交叉不再靠排序。玻璃不要走这里。
+ */
+export function cutout( material: Material ) {
 
 	const leaf = material as Material & { transparent: boolean; alphaTest: number; depthWrite: boolean; needsUpdate: boolean };
 	if ( ! leaf.transparent ) return;

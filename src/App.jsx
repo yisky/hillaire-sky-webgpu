@@ -12,7 +12,7 @@ import { Sky } from './sky'
 import { SkyProField } from './sky/clouds/skypro'
 import { Glare } from './glare'
 import { AutoExposure } from './exposure'
-import { createForest } from './trees'
+import { createForest, cutout } from './trees'
 import { SceneBloom } from './bloom/Bloom'
 import { Grade } from './grade/Grade'
 import { Display } from './grade/Display'
@@ -500,6 +500,7 @@ export default function App() {
 				// 地形、地面、道路可踩。楼和树不打 walk，第一人称不会站上去。
 				// 先开投射和接收，加进场地算出世界包围球后再把远处的关掉，阴影贴图留给近处。
 				const walk = /terrain|landscape|roads/.test( url )
+				const foliage = /building_trees/.test( url )
 				gltf.scene.traverse( ( obj ) => {
 
 					if ( walk ) obj.userData.walk = true
@@ -513,6 +514,9 @@ export default function App() {
 					const materials = obj.material
 					if ( ! materials ) return
 					for ( const material of Array.isArray( materials ) ? materials : [ materials ] ) {
+
+						// 主楼旁三棵树枝叶是 BLEND，卡片交叉会排错。改成和林子一样的镂空。
+						if ( foliage ) cutout( material )
 
 						// 中心地表：几乎不金属，法线强度反过来压一档，免得鼓包太硬。
 						if ( material.name === 'TerrainCenterNew' ) {
