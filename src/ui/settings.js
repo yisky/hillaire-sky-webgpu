@@ -412,7 +412,7 @@ export function createSettings() {
 	const saturation = slider( '饱和度', 1.06, 0.5, 1.5, 0.01, ( v ) => v.toFixed( 2 ) )
 	const contrast = slider( '对比度', 1.04, 0.8, 1.3, 0.01, ( v ) => v.toFixed( 2 ) )
 	const vignette = slider( '暗角', 0.28, 0, 1, 0.01, ( v ) => v.toFixed( 2 ) )
-	const grain = slider( '颗粒', 0.012, 0, 0.06, 0.001, ( v ) => v.toFixed( 3 ) )
+	const grain = slider( '颗粒', 0.02, 0, 0.08, 0.001, ( v ) => v.toFixed( 3 ) )
 	fx.body.append( glare.root )
 	fx.body.append( saturation.root )
 	fx.body.append( contrast.root )

@@ -28,7 +28,7 @@ import { createSettings } from './ui/settings'
  * 第一人称按 1.8 米视高，场地整体缩放 0.08，所以眼睛高度是 `1.8 * 0.08`。
  * `?demo=1` 跑 120 秒时间轴，结束后把控制交回轨道。
  *
- * 后期不走渲染器自带的色调映射。输出节点是 Display：ACES、sRGB、抖动。
+ * 后期不走渲染器自带的色调映射。输出节点是 Display：ACES、sRGB、颗粒、抖动。
  * 炫光可见度和自动曝光适应在 `pipeline.render()` 之后 compute，晚一帧生效。
  */
 const ORBIT_HOME = { position: [ - 5, 1.2, 5 ], target: [ 0, 1, 0 ], fov: 45 }
@@ -762,7 +762,7 @@ export default function App() {
 				grade.saturation.value = settings.saturation
 				grade.contrast.value = settings.contrast
 				grade.vignette.value = settings.vignette
-				grade.grain.value = settings.grain
+				display.grain.value = settings.grain
 				placeMoon( sky )
 				sky.update( renderer, delta, camera )
 				environment.update( sky.sunDirection )

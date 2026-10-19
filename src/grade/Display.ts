@@ -1,11 +1,12 @@
 /**
  * 显示变换。接在调色后面，管线最后一步。
  *
- * 线性 HDR 先乘曝光、走 ACES 压进大约 0..1，再按 sRGB 编码，最后加 ±1/255 抖动打色散带。
- * 曝光默认 `0.55`，界面按 EV 写成 `0.55 * 2^ev`。ACES、sRGB、抖动必须连在一起，中间不插别的节点。
+ * 线性 HDR 先乘曝光、走 ACES 压进大约 0..1，再按 sRGB 编码。
+ * 颗粒叠在编码后的图上，抖动 ±1/255 放最后打色散带。
+ * 曝光默认 `0.55`，界面按 EV 写成 `0.55 * 2^ev`。ACES 和 sRGB 必须连在一起，中间不插别的节点。
  *
  * 接法跟调色一样走 {@link TempNode}：图里直接用这个节点，`setup` 返回显示器该看到的颜色。
- * `updateBefore` 只写帧序号，抖动才不会停在原地。
+ * `updateBefore` 只写帧序号，颗粒和抖动才不会停在原地。
  * 管线要关掉自带的输出变换，避免和这里的 ACES、sRGB 叠两层。
  */
 
@@ -43,7 +44,10 @@ export class Display extends TempNode {
 	/** 色调映射前的曝光倍数。默认 `0.55`。 */
 	readonly exposure = uniform( 0.55 );
 
-	/** 帧序号。抖动哈希用它，每帧加一。 */
+	/** 颗粒强度。叠在 sRGB 上，`0` 关掉。默认 `0.02`。 */
+	readonly grain = uniform( 0.02 );
+
+	/** 帧序号。颗粒和抖动哈希用它，每帧加一。 */
 	private readonly frameIndex = uniform( 0, 'uint' );
 
 	/** 已经调过色的颜色。 */
@@ -62,31 +66,38 @@ export class Display extends TempNode {
 	}
 
 	/**
-	 * ACES、sRGB、抖动。接在调色后面，作为管线输出。
+	 * ACES、sRGB、颗粒、抖动。接在调色后面，作为管线输出。
 	 */
 	setup(): Node {
 
 		const color = this.input;
 		const exposure = this.exposure;
+		const grain = this.grain;
 		const frameIndex = this.frameIndex;
 
 		return Fn( () => {
 
 			const mapped = acesFilmicToneMapping( color.rgb, exposure ) as Node< 'vec3' >;
+			const encoded = linearToSrgb( mapped );
 			const pixel = uvec2( viewportCoordinate );
+			const noise = postHash( pixel, frameIndex )
+				.add( postHash( pixel.add( uvec2( uint( 7919 ), uint( 104729 ) ) ), frameIndex ) )
+				.sub( 1 )
+				.mul( 0.5 );
+			const grained = encoded.add( noise.mul( grain ) );
 			const dither = postHash( pixel.add( uvec2( uint( 31337 ), uint( 271 ) ) ), frameIndex )
 				.add( postHash( pixel.add( uvec2( uint( 1013 ), uint( 65537 ) ) ), frameIndex ) )
 				.sub( 1 )
 				.div( 255 );
 
-			return vec4( linearToSrgb( mapped ).add( dither ), 1 );
+			return vec4( grained.add( dither ), 1 );
 
 		} )() as Node< 'vec4' >;
 
 	}
 
 	/**
-	 * 帧序号加一。抖动哈希用它，色调映射本身不用。
+	 * 帧序号加一。颗粒和抖动哈希用它，色调映射本身不用。
 	 *
 	 * @param _frame 当前节点帧
 	 */
